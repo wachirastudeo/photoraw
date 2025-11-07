@@ -1,124 +1,128 @@
-# workers.py
 import os
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QObject, Signal, QRunnable
-from imaging import pipeline
+from PySide6.QtCore import QObject, Signal, QRunnable, QMutex
+from imaging import decode_image, pipeline, apply_transforms, preview_sharpen
 
 class DecodeSignals(QObject):
-    done  = Signal(dict)   # {"name", "full", "preview", "thumb"}
-    error = Signal(str)
+    done=Signal(dict); error=Signal(str)
 
 class DecodeWorker(QRunnable):
-    def __init__(self, path, preview_max=1600, thumb_w=140, thumb_h=90):
+    def __init__(self, path, thumb_w=72, thumb_h=48):
         super().__init__()
-        self.path = path
-        self.preview_max = preview_max
-        self.thumb_w = thumb_w
-        self.thumb_h = thumb_h
-        self.signals = DecodeSignals()
-
+        self.path=path; self.thumb_w=thumb_w; self.thumb_h=thumb_h
+        self.signals=DecodeSignals()
     def run(self):
         try:
-            ext = os.path.splitext(self.path)[1].lower()
-            if ext in (".jpg",".jpeg",".png",".tif",".tiff"):
-                img = Image.open(self.path).convert("RGB")
-                full = np.array(img, dtype=np.uint8)
-            else:
-                import rawpy
-                with rawpy.imread(self.path) as raw:
-                    full = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=8)
-
-            # preview
-            h,w,_ = full.shape
-            scale = min(1.0, self.preview_max / max(h,w))
-            if scale < 1.0:
-                pw, ph = int(w*scale), int(h*scale)
-                preview = np.array(Image.fromarray(full).resize((pw,ph), Image.LANCZOS), dtype=np.uint8)
-            else:
-                preview = full
-
-            # thumb
-            thumb = Image.fromarray(preview).copy()
-            thumb.thumbnail((self.thumb_w, self.thumb_h), Image.LANCZOS)
-            thumb = np.array(thumb, dtype=np.uint8)
-
-            self.signals.done.emit({"name": self.path, "full": full, "preview": preview, "thumb": thumb})
+            full, thumb = decode_image(self.path, (self.thumb_w, self.thumb_h))
+            self.signals.done.emit({"name":self.path,"full":full,"thumb":thumb})
         except Exception as e:
             self.signals.error.emit(f"Decode error: {self.path}\n{e}")
 
+class PreviewSignals(QObject):
+    ready=Signal(np.ndarray)
+
+class PreviewWorker(QRunnable):
+    _mutex = QMutex()
+    _latest_id = 0
+
+    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id):
+        super().__init__()
+        self.full_rgb=full_rgb
+        self.adj=adj
+        self.long_edge=long_edge
+        self.sharpen_amt=sharpen_amt
+        self.mode = mode  # "single" หรือ "split"
+        self.req_id=req_id
+        self.signals=PreviewSignals()
+
+    @classmethod
+    def next_id(cls):
+        cls._mutex.lock(); cls._latest_id += 1; rid = cls._latest_id; cls._mutex.unlock(); return rid
+    @classmethod
+    def is_stale(cls, rid):
+        cls._mutex.lock(); stale = rid < cls._latest_id; cls._mutex.unlock(); return stale
+
+    def _resize_long(self, arr, long_edge):
+        h,w,_=arr.shape; cur=max(h,w)
+        if cur<=long_edge: return arr
+        s=long_edge/float(cur); nw,nh=int(w*s),int(h*s)
+        return np.array(Image.fromarray(arr).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+
+    def run(self):
+        if PreviewWorker.is_stale(self.req_id): return
+
+        if self.mode == "split":
+            base = self._resize_long(self.full_rgb, self.long_edge)
+            # BEFORE: apply transforms เท่านั้น (ไม่ใส่แต่งสี) เพื่อเห็นต่างชัดเจน
+            b = apply_transforms(base.copy(), {"rotate": self.adj.get("rotate",0), "flip_h": self.adj.get("flip_h",False), "crop": self.adj.get("crop", None)})
+            # AFTER: แต่งสี + transforms
+            src01 = base.astype(np.float32)/255.0
+            after01 = pipeline(src01, self.adj)
+            a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
+            a = apply_transforms(a, self.adj)
+
+            b = preview_sharpen(b, self.sharpen_amt)
+            a = preview_sharpen(a, self.sharpen_amt)
+
+            h = min(b.shape[0], a.shape[0])
+            if b.shape[0]!=h: b = np.array(Image.fromarray(b).resize((b.shape[1], h), Image.BILINEAR))
+            if a.shape[0]!=h: a = np.array(Image.fromarray(a).resize((a.shape[1], h), Image.BILINEAR))
+            out = np.concatenate([b, a], axis=1)
+            if PreviewWorker.is_stale(self.req_id): return
+            self.signals.ready.emit(out)
+            return
+
+        # โหมดปกติ: AFTER อย่างเดียว
+        base = self._resize_long(self.full_rgb, self.long_edge)
+        src01 = base.astype(np.float32)/255.0
+        out01 = pipeline(src01, self.adj)
+        out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
+        out   = apply_transforms(out, self.adj)
+        out   = preview_sharpen(out, self.sharpen_amt)
+        if PreviewWorker.is_stale(self.req_id): return
+        self.signals.ready.emit(out)
+
 class ExportSignals(QObject):
-    progress = Signal(int, int)  # done, total
-    done  = Signal(str)
-    error = Signal(str)
+    progress=Signal(int,int); done=Signal(str); error=Signal(str)
 
 class ExportWorker(QRunnable):
-    """
-    items: list of dict: {name, full(np.uint8 HxWx3), settings}
-    opts: {
-      "fmt": "JPEG"|"PNG",
-      "quality": int(1..100)  (JPEG only),
-      "progressive": bool     (JPEG only),
-      "optimize": bool,       (JPEG only)
-      "long_edge": int|None,  (resize if set)
-      "suffix": str
-    }
-    """
     def __init__(self, items, out_dir, opts):
         super().__init__()
-        self.items = items
-        self.out_dir = out_dir
-        self.opts = opts
-        self.signals = ExportSignals()
+        self.items=items; self.out_dir=out_dir; self.opts=opts
+        self.signals=ExportSignals()
 
     def _resize_long_edge(self, arr, long_edge):
-        if not long_edge or long_edge <= 0:
-            return arr
-        h, w, _ = arr.shape
-        cur_long = max(h, w)
-        if cur_long <= long_edge:
-            return arr
-        scale = long_edge / float(cur_long)
-        new_w, new_h = int(w*scale), int(h*scale)
-        return np.array(Image.fromarray(arr).resize((new_w, new_h), Image.LANCZOS), dtype=np.uint8)
+        if not long_edge or long_edge<=0: return arr
+        from PIL import Image
+        h,w,_=arr.shape; cur=max(h,w)
+        if cur<=long_edge: return arr
+        s=long_edge/float(cur); nw,nh=int(w*s),int(h*s)
+        return np.array(Image.fromarray(arr).resize((nw,nh), Image.LANCZOS), dtype=np.uint8)
 
     def run(self):
         try:
-            total = len(self.items)
-            fmt = self.opts.get("fmt", "JPEG").upper()
-            quality = int(self.opts.get("quality", 90))
-            progressive = bool(self.opts.get("progressive", True))
-            optimize = bool(self.opts.get("optimize", True))
-            long_edge = self.opts.get("long_edge", None)
-            suffix = self.opts.get("suffix", "_edit") or "_edit"
-
-            for i, it in enumerate(self.items, start=1):
-                full01 = it["full"].astype(np.float32)/255.0
-                adj    = it["settings"]
-                out01  = pipeline(full01, adj)
-                out    = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
-
-                # resize if needed
-                out = self._resize_long_edge(out, long_edge)
-
-                base = os.path.splitext(os.path.basename(it["name"]))[0]
-                if fmt == "PNG":
-                    save_path = os.path.join(self.out_dir, f"{base}{suffix}.png")
-                    Image.fromarray(out).save(save_path, "PNG", compress_level=6, optimize=True)
+            total=len(self.items)
+            from PIL import Image
+            fmt=self.opts.get("fmt","JPEG").upper()
+            quality=int(self.opts.get("quality",92))
+            progressive=bool(self.opts.get("progressive",True))
+            optimize=bool(self.opts.get("optimize",True))
+            long_edge=self.opts.get("long_edge",None)
+            suffix=self.opts.get("suffix","_edit") or "_edit"
+            for i,it in enumerate(self.items, start=1):
+                full01=it["full"].astype(np.float32)/255.0
+                out01=pipeline(full01, it["settings"])
+                out=(np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
+                out=apply_transforms(out, it["settings"])
+                out=self._resize_long_edge(out, long_edge)
+                base=os.path.splitext(os.path.basename(it["name"]))[0]
+                if fmt=="PNG":
+                    Image.fromarray(out).save(os.path.join(self.out_dir, f"{base}{suffix}.png"),"PNG",compress_level=6,optimize=True)
                 else:
-                    # JPEG
-                    save_path = os.path.join(self.out_dir, f"{base}{suffix}.jpg")
-                    Image.fromarray(out).save(
-                        save_path,
-                        "JPEG",
-                        quality=max(1, min(100, quality)),
-                        progressive=progressive,
-                        optimize=optimize,
-                        subsampling="4:2:0"  # ขนาดเล็กลง
-                    )
-
-                self.signals.progress.emit(i, total)
-
+                    Image.fromarray(out).save(os.path.join(self.out_dir, f"{base}{suffix}.jpg"),"JPEG",
+                        quality=max(1,min(100,quality)), progressive=progressive, optimize=optimize, subsampling="4:2:0")
+                self.signals.progress.emit(i,total)
             self.signals.done.emit(self.out_dir)
         except Exception as e:
             self.signals.error.emit(str(e))
