@@ -54,8 +54,7 @@ class PreviewWorker(QRunnable):
 
         if self.mode == "split":
             base = self._resize_long(self.full_rgb, self.long_edge)
-            # BEFORE: apply transforms เท่านั้น (ไม่ใส่แต่งสี) เพื่อเห็นต่างชัดเจน
-            b = apply_transforms(base.copy(), {"rotate": self.adj.get("rotate",0), "flip_h": self.adj.get("flip_h",False), "crop": self.adj.get("crop", None)})
+            b = apply_transforms(base.copy(), self.adj)
             # AFTER: แต่งสี + transforms
             src01 = base.astype(np.float32)/255.0
             after01 = pipeline(src01, self.adj)

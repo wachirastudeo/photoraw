@@ -75,6 +75,9 @@ class Main(QWidget):
         btnExportAll=QPushButton("Export All"); btnExportAll.clicked.connect(self.export_all)
         btnExportFilt=QPushButton("Export (Filtered)"); btnExportFilt.clicked.connect(self.export_filtered)
 
+        # เพิ่มปุ่ม Reset
+        btnReset=QPushButton("Reset All Settings"); btnReset.clicked.connect(self.reset_all_settings)
+        
         btnBA=QPushButton("Before/After (Split)"); btnBA.setCheckable(True)
         btnBA.clicked.connect(self.toggle_split)
         self.btnBA = btnBA
@@ -87,6 +90,7 @@ class Main(QWidget):
 
         bar2.addWidget(btnExportSel); bar2.addWidget(btnExportAll); bar2.addWidget(btnExportFilt)
         bar2.addStretch(1)
+        bar2.addWidget(btnReset)  # เพิ่มปุ่ม Reset
         bar2.addWidget(btnBA)
         bar2.addSpacing(12)
         bar2.addWidget(btnRotL); bar2.addWidget(btnRotR); bar2.addWidget(btnFlip); bar2.addWidget(btnCrop)
@@ -242,18 +246,27 @@ class Main(QWidget):
         if self.current<0: return
         it=self.items[self.current]
         if it["full"] is None: return
-        # แสดงพรีวิวล่าสุดเป็นฐานของการครอป เพื่อให้ตำแหน่งตรงตา
-        from workers import PreviewWorker
+
+        # สร้างภาพพรีวิวสำหรับ Crop โดยเฉพาะ
+        # ต้องเป็นภาพที่ "แต่งสีแล้ว" แต่ "ยังไม่ transform" (crop/rotate/flip)
+        # เพื่อให้ผู้ใช้เห็นภาพที่ถูกต้องและ Crop บนภาพนั้นได้
+        from imaging import pipeline
+        from ui_helpers import qimage_from_u8
+
         long_edge = int(self.cmb_prev.currentText())
-        use_edge = long_edge  # โหมดธรรมดา
-        rid = PreviewWorker.next_id()
-        # สร้างพรีวิว AFTER เพื่อครอปตามภาพแต่งแล้ว (เป็น UX ที่คุ้นเคย)
-        worker = PreviewWorker(it["full"], dict(it["settings"]), use_edge, float(self.cmb_sharp.currentText()), "single", rid)
-        # รัน synchronous ง่ายๆ: สร้างภาพผ่านเมธอดภายใน (ทำซ้ำ logic)
-        # เพื่อความสั้น: reuse thread output ผ่านสัญญาณ -> ไม่สะดวกที่นี่
-        # ง่ายสุด: ใช้ภาพ thumb/preview ล่าสุดที่แสดงอยู่
-        pix = self.preview.pixmap()
-        if not pix: return
+        
+        # Resize base image
+        from PIL import Image
+        h,w,_ = it["full"].shape
+        s = long_edge / float(max(h,w)) if max(h,w) > long_edge else 1.0
+        nw,nh = int(w*s), int(h*s)
+        base_img = np.array(Image.fromarray(it["full"]).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+
+        # Apply color pipeline, but not transforms
+        after01 = pipeline(base_img.astype(np.float32)/255.0, it["settings"])
+        after_u8 = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
+        pix = QPixmap.fromImage(qimage_from_u8(after_u8))
+
         dlg = CropDialog(pix, self)
         if dlg.exec():
             crop_norm = dlg.get_normalized_crop()
