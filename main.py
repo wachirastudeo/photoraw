@@ -242,6 +242,21 @@ class Main(QWidget):
         self._persist_current_item()
         self._kick_preview_thread(force=True)
 
+    def reset_all_settings(self):
+        if self.current < 0:
+            QMessageBox.information(self, "Info", "No image selected")
+            return
+        it = self.items[self.current]
+        # รีเซ็ตค่าเป็นค่าเริ่มต้น
+        it["settings"] = DEFAULTS.copy()
+        # ลบการตั้งค่าการแปลงภาพที่อาจมีอยู่
+        for k in ("crop", "rotate", "flip_h"):
+            it["settings"].pop(k, None)
+        self._persist_current_item()
+        self.load_settings_to_ui()
+        self._kick_preview_thread(force=True)
+        self.update_status("Reset all settings")
+
     def do_crop_dialog(self):
         if self.current<0: return
         it=self.items[self.current]
