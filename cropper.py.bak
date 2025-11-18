@@ -117,10 +117,7 @@ class CropDialog(QDialog):
         lay.addWidget(btns)
         btns.accepted.connect(self.accept_crop)
         btns.rejected.connect(self.reject)
-        # Only the Reset button should clear the crop; OK/Cancel must not reset before validation
-        reset_btn = btns.button(QDialogButtonBox.Reset)
-        if reset_btn:
-            reset_btn.clicked.connect(self.reset_all)
+        btns.clicked.connect(self.reset_all)  # Connect the Reset button to reset function
 
         # ให้ QLabel รับ mouse events
         self.lab.setMouseTracking(True)  # Important for cursor changes
@@ -193,11 +190,6 @@ class CropDialog(QDialog):
             elif ev.type() == QEvent.MouseButtonRelease:
                 self.mode = None
                 return True
-
-            elif ev.type() == QEvent.Resize:
-                # Keep overlay in sync with label size when window resizes
-                self.overlay.setGeometry(self.lab.rect())
-                self.overlay.update_handles()
 
         return super().eventFilter(obj, ev)
 
