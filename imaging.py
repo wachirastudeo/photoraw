@@ -13,7 +13,9 @@ def clamp01(a):
 # ค่าตั้งต้น (รวมทรานส์ฟอร์ม)
 DEFAULTS = {
     "exposure":0.0,"contrast":0.0,"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0,
-    "saturation":0.0,"vibrance":0.0,"temperature":0.0,"tint":0.0,"gamma":1.0,"clarity":0.0,
+    "saturation":0.0,"vibrance":0.0,"temperature":0.0,"tint":0.0,"gamma":1.0,
+    "clarity":0.0,"texture":0.0,"mid_contrast":0.0,"dehaze":0.0,"denoise":0.0,
+    "vignette":0.0,"export_sharpen":0.2,
     **{f"h_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"s_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"l_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
@@ -58,12 +60,64 @@ def apply_contrast_gamma(rgb, contrast=0.0, gamma=1.0):
     if abs(contrast)>1e-6: out=0.5+(out-0.5)*(1.0+contrast)
     if abs(gamma-1.0)>1e-6: out=np.power(np.clip(out,0,1),1.0/gamma)
     return out
+ 
+def apply_dehaze(rgb, amount=0.0):
+    if abs(amount)<1e-6: return rgb
+    y = clamp01(rgb_to_lum(rgb))[...,None]
+    veil = y * (0.6*amount)
+    base = clamp01(rgb - veil)
+    return apply_contrast_gamma(base, contrast=0.4*amount, gamma=1.0)
+
+def apply_denoise(rgb, amount=0.0):
+    """ลด noise แบบ edge-aware ง่าย ๆ"""
+    if amount<=1e-6: return rgb
+    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
+    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
+    y = clamp01(rgb_to_lum(rgb))
+    gy, gx = np.gradient(y)
+    grad = np.abs(gy) + np.abs(gx)
+    w=np.exp(-grad*6.0)  # ขึ้นกับความชันของความสว่าง
+    mix = w[...,None]
+    out = rgb*mix + blur*(1.0-mix)
+    return clamp01(rgb*(1.0-amount) + out*amount)
+
+def apply_vignette(rgb, amount=0.0):
+    if abs(amount)<1e-6: return rgb
+    h,w,_=rgb.shape
+    y,x=np.ogrid[:h,:w]
+    cy, cx = (h-1)/2.0, (w-1)/2.0
+    ry = np.maximum(cy, 1.0); rx = np.maximum(cx, 1.0)
+    dy = (y-cy)/ry; dx=(x-cx)/rx
+    r2 = dx*dx + dy*dy
+    mask = np.clip(1.0 - amount*r2, 0.2, 1.0)
+    return clamp01(rgb*mask[...,None])
+
+def apply_unsharp(rgb, amount=0.0):
+    if amount<=1e-6: return rgb
+    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
+    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
+    mask = rgb - blur
+    return clamp01(rgb + mask*(1.5*amount))
+
+def apply_mid_contrast(rgb, amount=0.0):
+    """S-curve ดึง midtones"""
+    if abs(amount)<1e-6: return rgb
+    t = 0.5 + (rgb-0.5)*(1.0+1.6*amount)
+    return clamp01(t)
 
 def apply_clarity(rgb, amount=0.0):
     if abs(amount)<1e-6: return rgb
     pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
     blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
     return clamp01(rgb+(rgb-blur)*(0.45*amount))
+
+def apply_texture(rgb, amount=0.0):
+    """เพิ่มคอนทราสต์รายละเอียดขนาดเล็ก (high-pass)"""
+    if abs(amount)<1e-6: return rgb
+    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
+    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
+    high=rgb-blur
+    return clamp01(rgb + high*(0.8*amount))
 
 def rgb_to_hsv(rgb):
     r,g,b=rgb[...,0],rgb[...,1],rgb[...,2]
@@ -107,10 +161,15 @@ def pipeline(rgb01, adj):
     x=clamp01(rgb01*(2.0**adj["exposure"]))
     x=clamp01(apply_white_balance(x,adj["temperature"],adj["tint"]))
     x=clamp01(apply_tone_regions(x,adj["highlights"],adj["shadows"],adj["whites"],adj["blacks"]))
+    x=clamp01(apply_dehaze(x, adj["dehaze"]))
+    x=clamp01(apply_denoise(x, adj["denoise"]))
     x=clamp01(apply_saturation_vibrance(x,adj["saturation"],adj["vibrance"]))
     x=clamp01(apply_contrast_gamma(x,adj["contrast"],adj["gamma"]))
+    x=clamp01(apply_mid_contrast(x, adj["mid_contrast"]))
     x=clamp01(apply_clarity(x,adj["clarity"]))
+    x=clamp01(apply_texture(x, adj["texture"]))
     x=clamp01(apply_hsl_mixer(x,adj))
+    x=clamp01(apply_vignette(x, adj["vignette"]))
     return x
 
 def apply_transforms(arr_u8, adj):
@@ -142,6 +201,11 @@ def apply_transforms(arr_u8, adj):
         x1, y1 = min(w, x1), min(h, y1)
         if x1 > x0 and y1 > y0:
             out = out[y0:y1, x0:x1, :].copy()
+    # export sharpen (unsharp mask) — ทำหลัง transform
+    sh = float(adj.get("export_sharpen", 0.0))
+    if sh > 1e-6:
+        out_f = out.astype(np.float32)/255.0
+        out = (apply_unsharp(out_f, sh)*255.0+0.5).astype(np.uint8)
     return out
 
 def preview_sharpen(arr_u8, amount):

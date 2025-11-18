@@ -26,7 +26,7 @@ class PreviewWorker(QRunnable):
     _mutex = QMutex()
     _latest_id = 0
 
-    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id):
+    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None):
         super().__init__()
         self.full_rgb=full_rgb
         self.adj=adj
@@ -34,6 +34,8 @@ class PreviewWorker(QRunnable):
         self.sharpen_amt=sharpen_amt
         self.mode = mode  # "single" หรือ "split"
         self.req_id=req_id
+        self.live = live  # ถ้าลาก slider อยู่ ใช้พรีวิวเบา
+        self.base_override = base_override  # ใช้ภาพที่ resize มาแล้ว ถ้ามี
         self.signals=PreviewSignals()
 
     @classmethod
@@ -52,17 +54,20 @@ class PreviewWorker(QRunnable):
     def run(self):
         if PreviewWorker.is_stale(self.req_id): return
 
+        base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, self.long_edge)
         if self.mode == "split":
-            base = self._resize_long(self.full_rgb, self.long_edge)
+            # copy to keep base intact
+            base_local = base
             b = apply_transforms(base.copy(), self.adj)
             # AFTER: แต่งสี + transforms
-            src01 = base.astype(np.float32)/255.0
+            src01 = base_local.astype(np.float32)/255.0
             after01 = pipeline(src01, self.adj)
             a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
             a = apply_transforms(a, self.adj)
 
-            b = preview_sharpen(b, self.sharpen_amt)
-            a = preview_sharpen(a, self.sharpen_amt)
+            if not self.live:
+                b = preview_sharpen(b, self.sharpen_amt)
+                a = preview_sharpen(a, self.sharpen_amt)
 
             h = min(b.shape[0], a.shape[0])
             if b.shape[0]!=h: b = np.array(Image.fromarray(b).resize((b.shape[1], h), Image.BILINEAR))
@@ -73,12 +78,12 @@ class PreviewWorker(QRunnable):
             return
 
         # โหมดปกติ: AFTER อย่างเดียว
-        base = self._resize_long(self.full_rgb, self.long_edge)
         src01 = base.astype(np.float32)/255.0
         out01 = pipeline(src01, self.adj)
         out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
         out   = apply_transforms(out, self.adj)
-        out   = preview_sharpen(out, self.sharpen_amt)
+        if not self.live:
+            out   = preview_sharpen(out, self.sharpen_amt)
         if PreviewWorker.is_stale(self.req_id): return
         self.signals.ready.emit(out)
 

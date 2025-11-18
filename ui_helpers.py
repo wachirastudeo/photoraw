@@ -17,11 +17,13 @@ def colored_slider_style(hex_color: str):
     """
 
 def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, val: float, step=0.01,
-               on_change=None, on_reset=None, color_hex=None):
+               on_change=None, on_reset=None, color_hex=None, on_press=None, on_release=None):
     row = QHBoxLayout(); row.setContentsMargins(0,0,0,0)
     sld = QSlider(Qt.Horizontal)
     sld.setMinimum(int(lo/step)); sld.setMaximum(int(hi/step)); sld.setValue(int(val/step))
-    sld.setSingleStep(1); sld.setPageStep(5); sld.setTracking(False)
+    sld.setSingleStep(1); sld.setPageStep(5); sld.setTracking(True)
+    if on_press: sld.sliderPressed.connect(lambda : on_press())
+    if on_release: sld.sliderReleased.connect(lambda : on_release())
     if color_hex: sld.setStyleSheet(colored_slider_style(color_hex))
     lab = QLabel(f"{val:.2f}")
     sld.valueChanged.connect(lambda v: (lab.setText(f"{v*step:.2f}"), on_change and on_change(key, v*step)))
