@@ -16,7 +16,6 @@ ENV/
 env/
 
 # PyInstaller
-*.spec
 *.manifest
 
 # macOS
