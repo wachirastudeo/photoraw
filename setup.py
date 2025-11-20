@@ -19,7 +19,7 @@ OPTIONS = {
         'CFBundleIdentifier': "com.ninlab.app",
         'CFBundleVersion': "1.0.0",
         'CFBundleShortVersionString': "1.0.0",
-        'NSHumanReadableCopyright': "Copyright © 2025",
+        'NSHumanReadableCopyright': "Copyright © 2025 Wachira Studio",
         'NSHighResolutionCapable': True,
     },
     'packages': ['PySide6', 'numpy', 'PIL'],
