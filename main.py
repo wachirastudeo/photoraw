@@ -2,17 +2,18 @@ import os, sys, json
 import numpy as np
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, QLocale
-from PySide6.QtWidgets import (
+from PySide6.QtWidgets import ( # NOQA
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QGroupBox, QFormLayout, QMessageBox, QComboBox, QProgressDialog,
-    QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox
-)
-from PySide6.QtGui import QPixmap
+    QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea
+) # NOQA
+from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath
 
 from catalog import load_catalog, save_catalog, DEFAULT_ROOT
 from imaging import DEFAULTS
+from PySide6.QtCore import QEvent, QPoint, QPointF
 from workers import DecodeWorker, PreviewWorker, ExportWorker
-from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8
+from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout
 from export_dialog import ExportOptionsDialog
 from cropper import CropDialog
 from PySide6.QtWidgets import QInputDialog, QListWidget, QDialogButtonBox
@@ -26,7 +27,8 @@ _COLORS = ["red","orange","yellow","green","aqua","blue","purple","magenta"]
 class Main(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RAW Mini — Split Before/After + Crop/Rotate/Flip")
+        self.setWindowTitle("NinLab")
+        self._apply_app_theme()
         QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
         self.pool=QThreadPool.globalInstance()
 
@@ -44,44 +46,69 @@ class Main(QWidget):
         self.undo_stack = {}  # name -> list of settings snapshots (history)
         self.redo_stack = {}  # name -> redo history per image
         self.active_preset = None
+        self.hsl_scroll = None; self.hsl_content = None
+        self.preset_scroll = None; self.preset_content = None
         seeded = self._seed_default_presets()
         self.copied_settings = None  # สำหรับ copy/paste settings รายภาพ
         self.live_dragging = False
         self.live_inflight = False
+        # Zoom/Pan state
+        self.is_zoomed = False
+        self.zoom_point_norm = QPointF(0.5, 0.5) # Normalized coords on full image
+        self.pan_origin = None
+        self._is_panning = False
 
         root=QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
 
-        # top bar 1 (ไฟล์/พรีวิว/ฟิลเตอร์)
-        bar1=QHBoxLayout()
+        def make_labeled_block(text, widget, stretch=False):
+            block = QWidget(); row = QHBoxLayout(block)
+            row.setContentsMargins(0,0,0,0); row.setSpacing(4)
+            lab = QLabel(text); row.addWidget(lab)
+            row.addWidget(widget)
+            if stretch:
+                row.addStretch(1)
+                block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            else:
+                block.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            return block
+
+        # top bar 1 (ไฟล์/พรีวิว/ฟิลเตอร์) — flow layout to wrap controls automatically
+        toolbar1=FlowLayout()
         btnOpen=QPushButton("Open"); btnOpen.clicked.connect(self.open_files)
         btnDelete=QPushButton("Delete Selected"); btnDelete.clicked.connect(self.delete_selected)
-        btnStar=QPushButton("Toggle Star"); btnStar.clicked.connect(self.toggle_star_selected)
+        btnStar=QPushButton("★ Star"); btnStar.setToolTip("Toggle Star for selected images"); btnStar.clicked.connect(self.toggle_star_selected)
         self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred"]); self.filterBox.currentTextChanged.connect(self.apply_filter)
         btnProjNew=QPushButton("New Project"); btnProjNew.clicked.connect(self.new_project)
         btnProjOpen=QPushButton("Switch Project"); btnProjOpen.clicked.connect(self.switch_project)
-        self.lab_project = QLabel(f"Project: {self.project_dir.name}")
+        self.lab_project = QLabel(self.project_dir.name)
+        self.lab_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.lab_project.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        project_block = QWidget(); proj_row = QHBoxLayout(project_block)
+        proj_row.setContentsMargins(0,0,0,0); proj_row.setSpacing(4)
+        proj_row.addWidget(QLabel("Project:"))
+        proj_row.addWidget(self.lab_project, 1)
+        project_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        bar1.addWidget(btnOpen); bar1.addWidget(btnDelete); bar1.addWidget(btnStar)
-        bar1.addStretch(1)
-        bar1.addWidget(btnProjNew); bar1.addWidget(btnProjOpen); bar1.addWidget(self.lab_project)
-        bar1.addStretch(1)
-        bar1.addWidget(QLabel("Preview Size"))
+        toolbar1.addWidget(btnOpen); toolbar1.addWidget(btnDelete); toolbar1.addWidget(btnStar)
+        toolbar1.addWidget(btnProjNew); toolbar1.addWidget(btnProjOpen)
+        toolbar1.addWidget(project_block)
+        toolbar1.addWidget(make_labeled_block("Filter:", self.filterBox))
         self.cmb_prev = QComboBox(); self.cmb_prev.addItems(["540","720","900","1200"]); self.cmb_prev.setCurrentText("900")
-        bar1.addWidget(self.cmb_prev)
-        bar1.addSpacing(12); bar1.addWidget(QLabel("Sharpness"))
         self.cmb_sharp = QComboBox(); self.cmb_sharp.addItems(["0.00","0.15","0.30","0.45","0.60","0.80","1.00"])
         self.cmb_sharp.setCurrentText("0.30")
-        bar1.addStretch(1)
-        bar1.addWidget(QLabel("Filter:")); bar1.addWidget(self.filterBox)
-        root.addLayout(bar1)
+        toolbar1.addWidget(make_labeled_block("Preview Size", self.cmb_prev))
+        toolbar1.addWidget(make_labeled_block("Sharpness", self.cmb_sharp))
+        root.addLayout(toolbar1)
 
         # จำค่า UI เมื่อเปลี่ยน + รีเฟรชพรีวิว
         self.cmb_prev.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
         self.cmb_sharp.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
         self._apply_ui_from_catalog()
 
-        # top bar 2 (Export/BeforeAfter/Transform/Preset) single row
-        bar2=QHBoxLayout()
+        # top bar 2 (Export/BeforeAfter/Transform/Preset) with flow layout so it wraps as needed
+        toolbar2=FlowLayout()
 
         btnExportSel=QPushButton("Export Selected"); btnExportSel.clicked.connect(self.export_selected)
         btnExportAll=QPushButton("Export All"); btnExportAll.clicked.connect(self.export_all)
@@ -100,56 +127,61 @@ class Main(QWidget):
         self.btnBA = btnBA
 
         # Transform tools
-        btnRotL=QPushButton("Rotate ⟲"); btnRotL.clicked.connect(lambda: self.bump_rotate(-90))
-        btnRotR=QPushButton("Rotate ⟳"); btnRotR.clicked.connect(lambda: self.bump_rotate(+90))
-        btnFlip=QPushButton("Flip ↔");   btnFlip.clicked.connect(self.toggle_flip_h)
-        btnCrop=QPushButton("Crop");     btnCrop.clicked.connect(self.do_crop_dialog)
+        btnRotL=QToolButton(); btnRotL.setText("⟲"); btnRotL.setToolTip("Rotate Left"); btnRotL.clicked.connect(lambda: self.bump_rotate(-90))
+        btnRotR=QToolButton(); btnRotR.setText("⟳"); btnRotR.setToolTip("Rotate Right"); btnRotR.clicked.connect(lambda: self.bump_rotate(+90))
+        btnFlip=QToolButton(); btnFlip.setText("↔"); btnFlip.setToolTip("Flip Horizontal"); btnFlip.clicked.connect(self.toggle_flip_h)
+        btnCrop=QPushButton("Crop"); btnCrop.clicked.connect(self.do_crop_dialog)
 
-        bar2.addWidget(btnExportSel); bar2.addWidget(btnExportAll); bar2.addWidget(btnExportFilt)
-        bar2.addStretch(1)
-        bar2.addWidget(btnUndo); bar2.addWidget(btnRedo)
-        bar2.addWidget(btnCopy); bar2.addWidget(btnPaste); bar2.addWidget(btnReset)
-        bar2.addWidget(btnSavePreset); bar2.addWidget(btnApplyPreset)
-        bar2.addWidget(btnBA)
-        bar2.addSpacing(12)
-        bar2.addWidget(btnRotL); bar2.addWidget(btnRotR); bar2.addWidget(btnFlip); bar2.addWidget(btnCrop)
-        root.addLayout(bar2)
+        # Zoom tools
+        self.btnZoomFit = QPushButton("Fit"); self.btnZoomFit.setCheckable(True); self.btnZoomFit.setChecked(True)
+        self.btnZoom100 = QPushButton("1:1"); self.btnZoom100.setCheckable(True)
+        self.btnZoomFit.clicked.connect(self.zoom_fit)
+        self.btnZoom100.clicked.connect(self.zoom_100)
+
+        for btn in (btnExportSel, btnExportAll, btnExportFilt, btnReset):
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.setMinimumWidth(120)
+
+        for widget in (
+            btnExportSel, btnExportAll, btnExportFilt, btnReset, btnUndo, btnRedo,
+            btnCopy, btnPaste, btnSavePreset, btnApplyPreset, btnBA,
+            btnRotL, btnRotR, btnFlip, btnCrop, self.btnZoomFit, self.btnZoom100
+        ):
+            toolbar2.addWidget(widget)
+        root.addLayout(toolbar2)
 
         # content
         content=QHBoxLayout()
 
         # preview
         self.preview=QLabel("Open files to start"); self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(1080, 680); self.preview.setFrameShape(QFrame.StyledPanel)
-        self.preview.setStyleSheet("QLabel{background:#f6f7f9; color:#333; border:1px solid #dfe3e8;}")
+        self.preview.setMinimumSize(500, 320)
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preview.setFrameShape(QFrame.StyledPanel)
+        self.preview.setStyleSheet("QLabel{background:#09090b; color:#71717a; border:1px solid #3f3f46; border-radius:8px;}")
+        self.preview.setMouseTracking(True) # สำคัญมากสำหรับ Pan/Zoom บน Mac
         content.addWidget(self.preview, 4)
+        self.preview.installEventFilter(self)
+        self._last_preview_qimg = None
 
         # right panel — Reset + Tabs (keep reset per-image visible near controls)
+        right_panel = QVBoxLayout()
+        right_panel.setContentsMargins(0,0,0,0); right_panel.setSpacing(0)
+
         self.tabs=QTabWidget()
         self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane{ border:1px solid #dfe3e8; border-radius:8px; background:#fff; }
-            QTabBar::tab{ padding:6px 12px; border:1px solid #dfe3e8; border-bottom:none; background:#fafafa; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; }
-            QTabBar::tab:selected{ background:#ffffff; }
-        """)
+        self.tabs.setStyleSheet("") # Reset inline style to use global stylesheet
         self.tabs.addTab(self.group_basic(), "Basic")
         self.tabs.addTab(self.group_tone(), "Tone")
         self.tabs.addTab(self.group_color(), "Color")
         self.tabs.addTab(self.group_effects(), "Effects")
         self.tabs.addTab(self.group_hsl(), "HSL")
         self.tabs.addTab(self.group_presets_tab(), "Presets")
-        self.tabs.setFixedWidth(440)
-        if seeded:
-            self._refresh_preset_list()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        right_panel.addWidget(self.tabs)
 
-        right_panel = QVBoxLayout()
-        right_panel.setContentsMargins(0,0,0,0); right_panel.setSpacing(8)
-        btnResetImage = QPushButton("Reset This Image")
-        btnResetImage.clicked.connect(self.reset_all_settings)
-        right_panel.addWidget(btnResetImage)
-        right_panel.addWidget(self.tabs, 1)
-        right_panel.addStretch(1)
-        right_wrap = QWidget(); right_wrap.setLayout(right_panel); right_wrap.setFixedWidth(440)
+        right_wrap = QWidget(); right_wrap.setLayout(right_panel)
+        right_wrap.setFixedWidth(410)  # keep tool panel wide enough for labels/buttons
         content.addWidget(right_wrap, 0)
         root.addLayout(content, 1)
 
@@ -163,21 +195,60 @@ class Main(QWidget):
 
         # debounce + fullscreen
         self.debounce=QTimer(self); self.debounce.setSingleShot(True)
-        self.debounce.timeout.connect(self._kick_preview_thread)
+        self.debounce.timeout.connect(self._debounced_actions)
+        self.pan_update_timer = QTimer(self); self.pan_update_timer.setSingleShot(True)
+        self.pan_update_timer.timeout.connect(self._refresh_zoom_preview)
         self.setStyleSheet("""
-            QWidget{ font-size:12px; color:#222; }
-            QGroupBox{ border:1px solid #e6e9ee; border-radius:10px; padding:8px 10px 6px 10px; background:#ffffff; margin-top:8px; }
-            QGroupBox::title{ subcontrol-origin: margin; left:10px; padding:0 4px; color:#4a5568; font-weight:600; }
-            QPushButton{ background:#ffffff; border:1px solid #d0d5db; border-radius:8px; padding:6px 10px; }
-            QPushButton:hover{ background:#f1f5f9; }
+            QWidget{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size:12px; color:#f4f4f5; }
+            
+            /* GroupBox */
+            QGroupBox{ border:1px solid #3f3f46; border-radius:8px; padding:12px 10px 10px 10px; background:#27272a; margin-top:8px; }
+            QGroupBox::title{ subcontrol-origin: margin; left:10px; padding:0 4px; color:#a1a1aa; font-weight:600; background:#27272a; }
+            
+            /* Buttons */
+            QPushButton, QToolButton { 
+                background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:6px 12px; color:#f4f4f5; 
+            }
+            QPushButton:hover, QToolButton:hover { background:#52525b; border-color:#71717a; }
+            QPushButton:pressed, QToolButton:pressed { background:#27272a; border-color:#52525b; }
+            QPushButton:checked, QToolButton:checked { background:#4f46e5; border-color:#4338ca; color:white; }
+            QToolButton { font-size: 16px; padding: 4px 8px; }
+            
+            /* Sliders */
+            QSlider::groove:horizontal { border:1px solid #3f3f46; height:4px; background:#18181b; margin:2px 0; border-radius:2px; }
+            QSlider::handle:horizontal { background:#818cf8; border:1px solid #6366f1; width:14px; height:14px; margin:-6px 0; border-radius:7px; }
+            QSlider::handle:horizontal:hover { background:#a5b4fc; }
+            QSlider::sub-page:horizontal { background:#6366f1; border-radius:2px; }
+            
+            /* Tabs */
+            QTabWidget::pane{ border:1px solid #3f3f46; border-radius:8px; background:#27272a; top:-1px; }
+            QTabBar::tab{ 
+                padding:8px 16px; border:1px solid transparent; border-bottom:2px solid transparent; 
+                background:transparent; color:#a1a1aa; font-weight:500;
+            }
+            QTabBar::tab:selected{ color:#f4f4f5; border-bottom:2px solid #6366f1; }
+            QTabBar::tab:hover{ color:#e4e4e7; }
+            
+            /* ComboBox */
+            QComboBox { background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:4px 8px; color:#f4f4f5; }
+            QComboBox::drop-down { border:0px; }
+            QComboBox QAbstractItemView { background:#27272a; border:1px solid #52525b; selection-background-color:#4f46e5; color:#f4f4f5; }
+            
+            /* ScrollArea */
+            QScrollArea { border:0px; background:transparent; }
+            QScrollBar:vertical { border:0px; background:#18181b; width:10px; margin:0; }
+            QScrollBar::handle:vertical { background:#52525b; min-height:20px; border-radius:5px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+            
             QLabel{ background:transparent; }
+            QDialog { background:#18181b; }
         """)
+        if seeded:
+            self._refresh_preset_list()
         self.showMaximized()
 
     # ------- groups -------
     def group_basic(self):
-        container=QWidget(); outer=QVBoxLayout(container); outer.setContentsMargins(0,0,0,0); outer.setSpacing(8)
-
         g=QGroupBox("Basic"); f=QFormLayout(g)
         from imaging import DEFAULTS
         for k,conf in [("exposure",(-3,3,0.01)),("contrast",(-1,1,0.01)),("gamma",(0.3,2.2,0.01))]:
@@ -185,43 +256,51 @@ class Main(QWidget):
                             on_change=self.on_change,on_reset=self.on_reset_one,
                             on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
             self.sliders[k]={"s":s,"l":l,"step":conf[2]}
-        outer.addWidget(g)
-        return container
+        btn = QPushButton("Reset Basic")
+        btn.clicked.connect(lambda: self.reset_tab_settings(["exposure", "contrast", "gamma"]))
+        f.addRow(btn)
+        return g
 
     def group_presets_tab(self):
-        w=QWidget(); outer=QVBoxLayout(w); outer.setContentsMargins(6,6,6,6); outer.setSpacing(8)
+        container = QWidget()
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        base = QVBoxLayout(container); base.setContentsMargins(8,8,8,8); base.setSpacing(10)
+
+        # scrollable area for list
+        content=QWidget()
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        outer=QVBoxLayout(content); outer.setContentsMargins(0,0,0,0); outer.setSpacing(10); outer.setSizeConstraint(QVBoxLayout.SetMinimumSize)
         self.lst_presets = QListWidget(); self.lst_presets.itemClicked.connect(self._apply_preset_by_item)
         self.lst_presets.setSelectionRectVisible(False)
         self.lst_presets.setFrameShape(QFrame.NoFrame)
         self.lst_presets.setFocusPolicy(Qt.NoFocus)
         self.lst_presets.setStyleSheet("""
-            QListWidget{
-                border:0px;
-                background:transparent;
-                padding:4px;
-            }
-            QListWidget::item{
-                padding:8px 10px;
-                margin:2px 0px;
-                border:0px;
-            }
-            QListWidget::item:selected{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2563eb, stop:1 #7c3aed);
-                color:white;
-                border-radius:8px;
-                border:0px;
-                outline:0;
-            }
-            QListWidget::item:selected:active{ outline:0; border:0px; }
-            QListWidget::item:focus{ outline:0; }
-            QListWidget::item:selected:!active{ background:#2563eb; color:white; }
+            QListWidget{ border:0px; background:transparent; padding:4px; }
+            QListWidget::item{ padding:8px 10px; margin:2px 0px; border:0px; color:#a1a1aa; border-radius:6px; }
+            QListWidget::item:selected{ background:#4f46e5; color:white; }
+            QListWidget::item:hover:!selected{ background:#3f3f46; color:#e4e4e7; }
         """)
-        outer.addWidget(self.lst_presets, 1)
+        outer.addWidget(self.lst_presets)
+
+        scroll = QScrollArea()
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preset_content = content
+        self.preset_scroll = scroll
+
+        # bottom action bar (sticky)
+        action_wrap = QFrame(); action_wrap.setObjectName("presetActions")
+        action_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        action_layout = QVBoxLayout(action_wrap); action_layout.setContentsMargins(0,8,0,0); action_layout.setSpacing(6)
         self.lab_active_preset = QLabel("Active preset: None")
-        self.lab_active_preset.setStyleSheet("QLabel{padding:6px 8px; background:#eef2ff; border:1px solid #c7d2fe; border-radius:6px; color:#1e3a8a;}")
-        outer.addWidget(self.lab_active_preset)
+        self.lab_active_preset.setStyleSheet("QLabel{padding:6px 8px; background:#312e81; border:1px solid #4338ca; border-radius:6px; color:#e0e7ff;}")
         self.chk_preset_transform = QCheckBox("Include crop/rotate/flip when applying")
-        outer.addWidget(self.chk_preset_transform)
+        action_layout.addWidget(self.lab_active_preset)
+        action_layout.addWidget(self.chk_preset_transform)
         btn_row1=QHBoxLayout(); btn_row1.setSpacing(6)
         btn_row2=QHBoxLayout(); btn_row2.setSpacing(6)
         btn_save=QPushButton("Save Current"); btn_save.clicked.connect(self.save_preset_dialog)
@@ -229,13 +308,18 @@ class Main(QWidget):
         btn_all=QPushButton("Apply to All Loaded"); btn_all.clicked.connect(self.apply_preset_all)
         btn_filt=QPushButton("Apply to Filtered"); btn_filt.clicked.connect(self.apply_preset_filtered)
         btn_del=QPushButton("Delete"); btn_del.clicked.connect(self.delete_selected_preset)
-        # spread buttons into two rows for compact layout
+        for btn in (btn_save, btn_apply, btn_all, btn_filt, btn_del):
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn_row1.addWidget(btn_save); btn_row1.addWidget(btn_apply); btn_row1.addWidget(btn_del); btn_row1.addStretch(1)
         btn_row2.addWidget(btn_all); btn_row2.addWidget(btn_filt); btn_row2.addStretch(1)
-        outer.addLayout(btn_row1)
-        outer.addLayout(btn_row2)
+        action_layout.addLayout(btn_row1)
+        action_layout.addLayout(btn_row2)
+
+        base.addWidget(scroll, 1)
+        base.addWidget(action_wrap, 0)
+        self.preset_action_wrap = action_wrap
         self._refresh_preset_list()
-        return w
+        return container
 
     def group_tone(self):
         g=QGroupBox("Tone"); f=QFormLayout(g)
@@ -250,6 +334,9 @@ class Main(QWidget):
         s,l=add_slider(f, QLabel("Dehaze"), "dehaze", -0.5,1.0,DEFAULTS["dehaze"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["dehaze"]={"s":s,"l":l,"step":0.01}
+        btn = QPushButton("Reset Tone")
+        btn.clicked.connect(lambda: self.reset_tab_settings(["highlights", "shadows", "whites", "blacks", "mid_contrast", "dehaze"]))
+        f.addRow(btn)
         return g
 
     def group_color(self):
@@ -259,6 +346,9 @@ class Main(QWidget):
                            on_change=self.on_change,on_reset=self.on_reset_one,
                            on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
             self.sliders[k]={"s":s,"l":l,"step":0.01}
+        btn = QPushButton("Reset Color")
+        btn.clicked.connect(lambda: self.reset_tab_settings(["saturation", "vibrance", "temperature", "tint"]))
+        f.addRow(btn)
         return g
 
     def group_effects(self):
@@ -278,12 +368,19 @@ class Main(QWidget):
         s,l=add_slider(f, QLabel("Export Sharpen"), "export_sharpen", 0,1,DEFAULTS["export_sharpen"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["export_sharpen"]={"s":s,"l":l,"step":0.01}
+        btn = QPushButton("Reset Effects")
+        btn.clicked.connect(lambda: self.reset_tab_settings(["clarity", "texture", "denoise", "vignette", "export_sharpen"]))
+        f.addRow(btn)
         return g
 
     def group_hsl(self):
         from ui_helpers import create_chip
-        w=QWidget(); outer=QVBoxLayout(w); outer.setContentsMargins(4,4,4,4); outer.setSpacing(10)
-        g_h=QGroupBox("Color Mixer – Hue (°)"); f_h=QFormLayout(g_h)
+        content=QWidget()
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        outer=QVBoxLayout(content); outer.setContentsMargins(0,0,0,0); outer.setSpacing(12); outer.setSizeConstraint(QVBoxLayout.SetMinimumSize)
+        g_h=QGroupBox("Color Mixer – Hue (°)")
+        f_h=QFormLayout(g_h)
+        f_h.setHorizontalSpacing(10); f_h.setVerticalSpacing(6)
         for c in _COLORS:
             key=f"h_{c}"
             chip=create_chip(_COLOR_SWATCH[c], c.capitalize()+" Hue")
@@ -293,7 +390,9 @@ class Main(QWidget):
                            color_hex=_COLOR_SWATCH[c])
             self.sliders[key]={"s":s,"l":l,"step":1.0}
         outer.addWidget(g_h)
-        g_s=QGroupBox("Color Mixer – Saturation"); f_s=QFormLayout(g_s)
+        g_s=QGroupBox("Color Mixer – Saturation")
+        f_s=QFormLayout(g_s)
+        f_s.setHorizontalSpacing(10); f_s.setVerticalSpacing(6)
         for c in _COLORS:
             key=f"s_{c}"
             chip=create_chip(_COLOR_SWATCH[c], c.capitalize()+" Saturation")
@@ -303,7 +402,9 @@ class Main(QWidget):
                            color_hex=_COLOR_SWATCH[c])
             self.sliders[key]={"s":s,"l":l,"step":0.01}
         outer.addWidget(g_s)
-        g_l=QGroupBox("Color Mixer – Luminance"); f_l=QFormLayout(g_l)
+        g_l=QGroupBox("Color Mixer – Luminance")
+        f_l=QFormLayout(g_l)
+        f_l.setHorizontalSpacing(10); f_l.setVerticalSpacing(6)
         for c in _COLORS:
             key=f"l_{c}"
             chip=create_chip(_COLOR_SWATCH[c], c.capitalize()+" Luminance")
@@ -313,7 +414,27 @@ class Main(QWidget):
                            color_hex=_COLOR_SWATCH[c])
             self.sliders[key]={"s":s,"l":l,"step":0.01}
         outer.addWidget(g_l)
-        return w
+        
+        btn = QPushButton("Reset HSL")
+        # Generate all HSL keys
+        hsl_keys = []
+        for c in _COLORS:
+            hsl_keys.extend([f"h_{c}", f"s_{c}", f"l_{c}"])
+        btn.clicked.connect(lambda: self.reset_tab_settings(hsl_keys))
+        outer.addWidget(btn)
+        
+        outer.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.hsl_content = content # for old sync logic, might remove
+        self.hsl_scroll = scroll
+        return scroll
 
     # ------- persistence helpers -------
     def _persist_current_item(self):
@@ -343,6 +464,26 @@ class Main(QWidget):
         }
         self.catalog["__presets__"] = self.presets
         save_catalog(self.catalog, self.project_dir)
+
+    def _apply_app_theme(self):
+        # Use a flat Fusion style on macOS to avoid Aqua spacing/truncation issues
+        app = QApplication.instance()
+        if sys.platform == "darwin":
+            app.setStyle("Fusion")
+
+        pal = QPalette()
+        # Dark Theme Palette (Zinc-900 base)
+        pal.setColor(QPalette.Window, QColor("#18181b"))
+        pal.setColor(QPalette.WindowText, QColor("#f4f4f5"))
+        pal.setColor(QPalette.Base, QColor("#27272a"))
+        pal.setColor(QPalette.AlternateBase, QColor("#3f3f46"))
+        pal.setColor(QPalette.Text, QColor("#f4f4f5"))
+        pal.setColor(QPalette.Button, QColor("#27272a"))
+        pal.setColor(QPalette.ButtonText, QColor("#f4f4f5"))
+        pal.setColor(QPalette.Highlight, QColor("#6366f1")) # Indigo-500
+        pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+        pal.setColor(QPalette.Link, QColor("#818cf8"))
+        app.setPalette(pal)
 
     # ------- split toggle -------
     def toggle_split(self):
@@ -375,6 +516,7 @@ class Main(QWidget):
         self.redo_stack.get(it["name"], []).clear()
         # รีเซ็ตค่าเป็นค่าเริ่มต้น
         it["settings"] = DEFAULTS.copy()
+        it["applied_preset"] = None
         # ลบการตั้งค่าการแปลงภาพที่อาจมีอยู่
         for k in ("crop", "rotate", "flip_h"):
             it["settings"].pop(k, None)
@@ -382,6 +524,25 @@ class Main(QWidget):
         self.load_settings_to_ui()
         self._kick_preview_thread(force=True)
         self.update_status("Reset all settings")
+        self._mark_active_preset(None)
+
+    def reset_tab_settings(self, keys):
+        if self.current < 0: return
+        it = self.items[self.current]
+        self._push_undo(it)
+        self.redo_stack.get(it["name"], []).clear()
+        
+        changed = False
+        for k in keys:
+            if k in it["settings"] and it["settings"][k] != DEFAULTS[k]:
+                it["settings"][k] = DEFAULTS[k]
+                changed = True
+        
+        if changed:
+            self._persist_current_item()
+            self.load_settings_to_ui()
+            self._kick_preview_thread(force=True)
+            self.update_status("Reset tab settings")
 
     def do_crop_dialog(self):
         if self.current<0: return
@@ -427,6 +588,10 @@ class Main(QWidget):
         self.debounce.start(25 if self.live_dragging else 100)
         self._persist_current_item()
 
+    def _debounced_actions(self):
+        self._kick_preview_thread()
+        self._persist_current_item()
+
     def on_reset_one(self, key):
         if self.current<0: return
         it=self.items[self.current]
@@ -434,7 +599,7 @@ class Main(QWidget):
         self.redo_stack.get(it["name"], []).clear()
         it["settings"][key]=DEFAULTS[key]
         self.load_settings_to_ui()
-        self.debounce.start(90)
+        self.debounce.start(100)
         self._persist_current_item()
 
     # ------- file ops -------
@@ -770,10 +935,11 @@ class Main(QWidget):
         if self.live_dragging:
             if self.live_inflight:
                 return
-            use_edge = min(use_edge, 900)
+            use_edge = min(use_edge, 720) # Use a smaller preview for live dragging
 
         base_override = None
-        cache = it.setdefault("preview_cache", {})
+        # Zooming is dynamic, don't use cache for it.
+        cache = it.setdefault("preview_cache", {}) if not self.is_zoomed else {}
         cache_key = (mode, use_edge)
         if cache_key in cache:
             base_override = cache[cache_key]
@@ -789,7 +955,10 @@ class Main(QWidget):
             cache[cache_key] = base_override
 
         req_id = PreviewWorker.next_id()
-        worker=PreviewWorker(it["full"], dict(it["settings"]), use_edge, sharpen_amt, mode, req_id, live=self.live_dragging, base_override=base_override)
+        worker=PreviewWorker(it["full"], dict(it["settings"]), use_edge, sharpen_amt, mode, req_id,
+                             live=self.live_dragging, base_override=base_override,
+                             is_zoomed=self.is_zoomed, zoom_point=self.zoom_point_norm,
+                             preview_size=self.preview.size())
         worker.signals.ready.connect(self._show_preview_pix)
         if self.live_dragging:
             self.live_inflight = True
@@ -803,12 +972,141 @@ class Main(QWidget):
         self.live_dragging = False
         self._kick_preview_thread(force=True)
 
+    # ------- Zoom Tools -------
+    def zoom_fit(self):
+        self.is_zoomed = False
+        self.pan_update_timer.stop()
+        self._update_zoom_buttons()
+        self._kick_preview_thread(force=True)
+
+    def zoom_100(self):
+        self.is_zoomed = True
+        self.pan_update_timer.stop()
+        self._update_zoom_buttons()
+        self._kick_preview_thread(force=True)
+
+    def _update_zoom_buttons(self):
+        self.btnZoomFit.setChecked(not self.is_zoomed)
+        self.btnZoom100.setChecked(self.is_zoomed)
+
+    def _reset_zoom(self):
+        self.is_zoomed = False
+        self.zoom_point_norm = QPointF(0.5, 0.5)
+        self.pan_update_timer.stop()
+
+    def _refresh_zoom_preview(self):
+        self._kick_preview_thread(force=True)
+
+    def _schedule_pan_preview_update(self):
+        # restart timer so continuous drags coalesce into ~60fps updates
+        self.pan_update_timer.start(16)
+
     def _show_preview_pix(self, arr):
         from ui_helpers import qimage_from_u8
         qimg = qimage_from_u8(arr)
+        self._last_preview_qimg = qimg
+
         pm = QPixmap.fromImage(qimg).scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
+        self.preview.setAlignment(Qt.AlignCenter) # Force re-alignment
         self.live_inflight = False
+
+    def eventFilter(self, obj, event):
+        # [REVISED] This logic is designed to be robust for both mouse and trackpad gestures on macOS.
+        if obj is not self.preview or self.current < 0:
+            return super().eventFilter(obj, event)
+
+        # --- Mouse Press: Prepare for a pan or a click-to-zoom ---
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if self.is_zoomed:
+                self.pan_origin = event.position().toPoint()
+                self._is_panning = False # Reset panning flag, will be set on first move
+            return True
+
+        # --- Mouse Move: Handle the actual panning action ---
+        elif event.type() == QEvent.MouseMove:
+            # Condition: We are zoomed, left button is down, and a pan has been initiated.
+            if self.is_zoomed and self.pan_origin is not None and (event.buttons() & Qt.LeftButton):
+                self.preview.setCursor(Qt.ClosedHandCursor)
+                self._is_panning = True
+                delta = event.position().toPoint() - self.pan_origin
+                self.pan_origin = event.position().toPoint()
+
+                # Convert pixel delta to normalized delta
+                scale_factor = 2.0  # Approximation for 100% zoom vs fit
+                dx = delta.x() / (self.preview.width() * scale_factor)
+                dy = delta.y() / (self.preview.height() * scale_factor)
+
+                self.zoom_point_norm.setX(max(0.0, min(1.0, self.zoom_point_norm.x() - dx)))
+                self.zoom_point_norm.setY(max(0.0, min(1.0, self.zoom_point_norm.y() - dy)))
+                self._schedule_pan_preview_update()
+            # If just hovering (not panning), update cursor
+            elif self.is_zoomed:
+                self.preview.setCursor(Qt.OpenHandCursor)
+            else:
+                self.preview.setCursor(Qt.CrossCursor)
+            return True # Consume mouse move events over the preview
+
+        # --- Mouse Release: Finalize the action (pan or click) ---
+        elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if self.is_zoomed:
+                # If no movement occurred, it was a click to zoom out.
+                if not self._is_panning:
+                    self.zoom_fit()
+                self.preview.setCursor(Qt.OpenHandCursor)
+                if self._is_panning and self.pan_update_timer.isActive():
+                    self.pan_update_timer.stop()
+                    self._kick_preview_thread(force=True)
+            else:  # Was not zoomed, so this click means "zoom in"
+                self.is_zoomed = True
+                pm_rect = self.preview.pixmap().rect()
+                label_rect = self.preview.contentsRect()
+                offset_x = (label_rect.width() - pm_rect.width()) // 2
+                offset_y = (label_rect.height() - pm_rect.height()) // 2
+                click_on_pixmap = event.position().toPoint() - QPoint(offset_x, offset_y)
+                nx = click_on_pixmap.x() / pm_rect.width() if pm_rect.width() > 0 else 0.5
+                ny = click_on_pixmap.y() / pm_rect.height() if pm_rect.height() > 0 else 0.5
+                self.zoom_point_norm = QPointF(max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny)))
+                self._update_zoom_buttons()
+                self._kick_preview_thread(force=True)
+
+            # Always reset panning state on release
+            self.pan_origin = None
+            self._is_panning = False
+            return True
+
+        # --- Mouse Leave: Clear cursor ---
+        elif event.type() == QEvent.Leave:
+            self.preview.unsetCursor()
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        # Keep preview scaled to the current space to avoid overflowing on smaller screens
+        if self._last_preview_qimg is not None:
+            pm = QPixmap.fromImage(self._last_preview_qimg).scaled(
+                self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.preview.setPixmap(pm)
+        QTimer.singleShot(0, self._sync_scroll_tabs) # Defer tab sync to prevent layout instability
+        super().resizeEvent(event)
+
+    def _on_tab_changed(self, index):
+        QTimer.singleShot(1, self._sync_scroll_tabs) # Delay sync to allow tab to become visible
+
+    def showEvent(self, event):
+        return super().showEvent(event)
+
+    def _sync_scroll_tabs(self):
+        # [REVISED] This function is critical for layout stability.
+        # The old logic forced a minimum height, causing the window to overflow on smaller screens.
+        # The new logic simply ensures the content inside the scroll area can expand horizontally
+        # to fit the available width, without forcing any vertical size. This lets Qt's layout
+        # engine correctly manage the window size based on screen dimensions.
+        if not hasattr(self, "tabs") or self.tabs is None or self.tabs.width() < 100: return
+        viewport_w = self.tabs.width() - 40 # Leave some margin for scrollbar and padding
+        for scroll, content in ((self.hsl_scroll, self.hsl_content), (self.preset_scroll, self.preset_content)):
+            if scroll and content and scroll.widget():
+                content.setMinimumWidth(viewport_w)
 
     # ------- Export -------
     def _ask_export_options(self):
@@ -912,11 +1210,24 @@ class Main(QWidget):
         base = lambda **k: {**{kk:vv for kk,vv in DEFAULTS.items() if kk not in ("crop","rotate","flip_h")}, **k}
         return {
             "Clean Boost": base(exposure=0.25, contrast=0.12, clarity=0.08, vibrance=0.12, export_sharpen=0.35),
-            "Vivid Punch": base(contrast=0.2, saturation=0.18, vibrance=0.22, texture=0.1, mid_contrast=0.08, export_sharpen=0.4),
-            "Soft Film": base(contrast=-0.08, clarity=-0.06, texture=-0.04, gamma=1.05, vignette=0.12, export_sharpen=0.25),
-            "Mono Matte": base(saturation=-1.0, vibrance=-1.0, contrast=-0.05, mid_contrast=0.1, clarity=0.04, vignette=0.08, export_sharpen=0.3),
-            "Warm Portrait": base(contrast=0.06, highlights=-0.05, shadows=0.08, temperature=0.1, tint=0.05, clarity=0.02, vibrance=0.08, denoise=0.1),
-        }
+        "Vivid Punch": base(contrast=0.2, saturation=0.18, vibrance=0.22, texture=0.1, mid_contrast=0.08, export_sharpen=0.4),
+        "Soft Film": base(contrast=-0.08, clarity=-0.06, texture=-0.04, gamma=1.05, vignette=0.12, export_sharpen=0.25),
+        "Mono Matte": base(saturation=-1.0, vibrance=-1.0, contrast=-0.05, mid_contrast=0.1, clarity=0.04, vignette=0.08, export_sharpen=0.3),
+        "Warm Portrait": base(contrast=0.06, highlights=-0.05, shadows=0.08, temperature=0.1, tint=0.05, clarity=0.02, vibrance=0.08, denoise=0.1),
+        
+        # New Presets
+        "Cool Matte": base(saturation=-0.2, vibrance=-0.1, temperature=-0.1, blacks=0.1, mid_contrast=-0.1, vignette=0.15),
+        "B&W High Contrast": base(saturation=-1.0, vibrance=-1.0, contrast=0.25, mid_contrast=0.15, clarity=0.15, highlights=0.1, shadows=-0.1, export_sharpen=0.5),
+        "Vintage Warm": base(temperature=0.15, tint=0.05, contrast=-0.1, gamma=1.05, blacks=0.1, vignette=0.25, texture=-0.05),
+        "Cinematic": base(
+            contrast=0.1, mid_contrast=0.05, vibrance=0.1, saturation=-0.1,
+            # Teal shadows / Orange highlights approximation using HSL
+            h_orange=-5, s_orange=0.1, l_orange=0.05,  # Skin tones
+            h_blue=-10, s_blue=0.2, l_blue=-0.1,       # Shadows/Blues -> Teal
+            h_aqua=10, s_aqua=0.1,                     # Aqua -> Teal
+            vignette=0.15, export_sharpen=0.3
+        ),
+    }
 
     def _seed_default_presets(self):
         changed = False
@@ -931,7 +1242,7 @@ class Main(QWidget):
         return changed
 
     def _load_project(self, proj_dir: Path):
-        self.project_dir = proj_dir
+        self.project_dir = proj_dir.resolve()
         self.project_dir.mkdir(parents=True, exist_ok=True)
         self.catalog = load_catalog(self.project_dir)
         self.presets = self.catalog.get("__presets__", {})
@@ -940,7 +1251,7 @@ class Main(QWidget):
         self.items.clear(); self.current=-1; self.view_filter="All"; self.split_mode=False
         if hasattr(self, "film"): self.film.clear()
         if hasattr(self, "preview"): self.preview.setPixmap(QPixmap())
-        self.lab_project.setText(f"Project: {self.project_dir.name}")
+        self.lab_project.setText(self.project_dir.name)
         self._apply_ui_from_catalog()
         self._seed_default_presets()
         self._refresh_preset_list()
@@ -948,15 +1259,20 @@ class Main(QWidget):
 
     def new_project(self):
         d = QFileDialog.getExistingDirectory(self,"Create / Choose Project Folder", str(DEFAULT_ROOT))
-        if not d: return
+        if not d or not Path(d).is_dir(): return
         self._load_project(Path(d))
 
     def switch_project(self):
         d = QFileDialog.getExistingDirectory(self,"Switch Project", str(DEFAULT_ROOT))
-        if not d: return
+        if not d or not Path(d).is_dir(): return
         self._load_project(Path(d))
 
 if __name__=="__main__":
+    # macOS HiDPI / Retina: rely on Qt6 auto scaling, just adjust rounding and layer usage
+    if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # if sys.platform == "darwin":
+    #     os.environ.setdefault("QT_MAC_WANTS_LAYER", "1") # This can cause blank screens on some macOS/Qt versions
     app=QApplication(sys.argv)
     w=Main()
     sys.exit(app.exec())

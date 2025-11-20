@@ -1,20 +1,9 @@
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QRect, QPoint
 from PySide6.QtWidgets import (
     QFormLayout, QHBoxLayout, QWidget, QFrame, QLabel, QSlider, QToolButton,
-    QListWidget, QListWidgetItem, QAbstractItemView
+    QListWidget, QListWidgetItem, QAbstractItemView, QLayout, QSizePolicy, QStyle
 )
 from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont
-
-def colored_slider_style(hex_color: str):
-    return f"""
-    QSlider::groove:horizontal {{ height: 6px; background: #e6e9ee; border-radius: 3px; }}
-    QSlider::sub-page:horizontal {{ background: {hex_color}; height: 6px; border-radius: 3px; }}
-    QSlider::add-page:horizontal {{ background: #e6e9ee; height: 6px; border-radius: 3px; }}
-    QSlider::handle:horizontal {{
-        background: {hex_color}; border: 1px solid rgba(0,0,0,0.15);
-        width: 12px; height: 12px; margin: -4px 0; border-radius: 6px;
-    }}
-    """
 
 def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, val: float, step=0.01,
                on_change=None, on_reset=None, color_hex=None, on_press=None, on_release=None):
@@ -22,9 +11,51 @@ def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, 
     sld = QSlider(Qt.Horizontal)
     sld.setMinimum(int(lo/step)); sld.setMaximum(int(hi/step)); sld.setValue(int(val/step))
     sld.setSingleStep(1); sld.setPageStep(5); sld.setTracking(True)
-    if on_press: sld.sliderPressed.connect(lambda : on_press())
-    if on_release: sld.sliderReleased.connect(lambda : on_release())
-    if color_hex: sld.setStyleSheet(colored_slider_style(color_hex))
+    if on_press: sld.sliderPressed.connect(on_press)
+    if on_release: sld.sliderReleased.connect(on_release)
+
+    # --- [REVISED] สร้าง Gradient Stylesheet ตามประเภทของ Slider ---
+    gradient_style = ""
+    # Temperature: Blue -> Yellow
+    if key == "temperature":
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #85c1e9, stop:1 #f7dc6f);"
+    # Tint: Green -> Magenta
+    elif key == "tint":
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a3e635, stop:1 #d946ef);"
+    # Saturation / Vibrance: Gray -> Color
+    elif key in ("saturation", "vibrance"):
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9ca3af, stop:1 #ef4444);"
+    # HSL - Hue
+    elif key.startswith("h_"):
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e11d48, stop:0.17 #f97316, stop:0.33 #eab308, stop:0.5 #22c55e, stop:0.67 #3b82f6, stop:0.83 #a855f7, stop:1 #e11d48);"
+    # HSL - Saturation
+    elif key.startswith("s_") and color_hex:
+        gradient_style = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9ca3af, stop:1 {color_hex});"
+    # HSL - Luminance
+    elif key.startswith("l_") and color_hex:
+        gradient_style = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #000000, stop:0.5 {color_hex}, stop:1 #ffffff);"
+
+    # กำหนด Stylesheet ให้กับ Slider ถ้ามี Gradient ที่ต้องใช้
+    if gradient_style:
+        sld.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                border: 1px solid #cbd5e1;
+                height: 8px;
+                background: {gradient_style};
+                margin: 2px 0;
+                border-radius: 4px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #ffffff;
+                border: 1px solid #94a3b8;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0; /* ปรับ Handle ให้อยู่ตรงกลาง Groove */
+                border-radius: 8px;
+            }}
+        """)
+    # --- จบส่วนที่แก้ไข ---
+
     lab = QLabel(f"{val:.2f}")
     sld.valueChanged.connect(lambda v: (lab.setText(f"{v*step:.2f}"), on_change and on_change(key, v*step)))
     btn = QToolButton(); btn.setText("↺"); btn.setToolTip("Reset")
@@ -61,3 +92,87 @@ def badge_star(pixmap: QPixmap, starred: bool) -> QPixmap:
 def qimage_from_u8(arr):
     h,w,_=arr.shape
     return QImage(arr.data, w, h, 3*w, QImage.Format_RGB888)
+
+class FlowLayout(QLayout):
+    """Simple flow layout so toolbar widgets can wrap on smaller screens."""
+    def __init__(self, parent=None, margin=0, hSpacing=8, vSpacing=6):
+        super().__init__(parent)
+        self._items=[]
+        self._hSpacing=hSpacing
+        self._vSpacing=vSpacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.sizeHint())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _h_spacing(self):
+        return self._spacing(self._hSpacing, QStyle.PM_LayoutHorizontalSpacing)
+
+    def _v_spacing(self):
+        return self._spacing(self._vSpacing, QStyle.PM_LayoutVerticalSpacing)
+
+    def _spacing(self, space, pm):
+        if space >= 0:
+            return space
+        parent = self.parentWidget()
+        if parent is None:
+            return 6
+        return parent.style().pixelMetric(pm, None, parent)
+
+    def _do_layout(self, rect, testOnly):
+        x = rect.x()
+        y = rect.y()
+        line_height = 0
+        space_x = self._h_spacing()
+        space_y = self._v_spacing()
+        max_width = rect.width()
+
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + space_x
+            if line_height > 0 and next_x - rect.x() > max_width:
+                x = rect.x()
+                y += line_height + space_y
+                next_x = x + hint.width() + space_x
+                line_height = 0
+            if not testOnly:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+
+        return y + line_height - rect.y()

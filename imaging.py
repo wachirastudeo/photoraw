@@ -147,7 +147,16 @@ def _color_weight(h, center, width=_COLOR_WIDTH):
     d=_circ_dist(h,center); w=np.clip(1.0-(d/width),0,1); return w*w*(3-2*w)
 
 def apply_hsl_mixer(rgb, adj):
+    # Check if any HSL adjustments are actually active before converting to HSV
+    has_adj = False
     _COLOR_CENTERS = {"red":0.0,"orange":30.0,"yellow":60.0,"green":120.0,"aqua":180.0,"blue":240.0,"purple":280.0,"magenta":320.0}
+    for name in _COLOR_CENTERS.keys():
+        if abs(float(adj.get(f"h_{name}",0.0)))>1e-6 or abs(float(adj.get(f"s_{name}",0.0)))>1e-6 or abs(float(adj.get(f"l_{name}",0.0)))>1e-6:
+            has_adj = True
+            break
+    if not has_adj:
+        return rgb
+
     h,s,v=rgb_to_hsv(rgb); hn, sn, vn = h.copy(), s.copy(), v.copy()
     for name,center in _COLOR_CENTERS.items():
         w=_color_weight(h,center)
@@ -157,12 +166,13 @@ def apply_hsl_mixer(rgb, adj):
         if abs(dl)>1e-6: vn=np.clip(vn+dl*w*0.5,0,1)
     return hsv_to_rgb(hn,sn,vn)
 
-def pipeline(rgb01, adj):
+def pipeline(rgb01, adj, fast_mode=False):
     x=clamp01(rgb01*(2.0**adj["exposure"]))
     x=clamp01(apply_white_balance(x,adj["temperature"],adj["tint"]))
     x=clamp01(apply_tone_regions(x,adj["highlights"],adj["shadows"],adj["whites"],adj["blacks"]))
     x=clamp01(apply_dehaze(x, adj["dehaze"]))
-    x=clamp01(apply_denoise(x, adj["denoise"]))
+    if not fast_mode:
+        x=clamp01(apply_denoise(x, adj["denoise"]))
     x=clamp01(apply_saturation_vibrance(x,adj["saturation"],adj["vibrance"]))
     x=clamp01(apply_contrast_gamma(x,adj["contrast"],adj["gamma"]))
     x=clamp01(apply_mid_contrast(x, adj["mid_contrast"]))

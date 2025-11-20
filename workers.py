@@ -26,7 +26,7 @@ class PreviewWorker(QRunnable):
     _mutex = QMutex()
     _latest_id = 0
 
-    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None):
+    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None, is_zoomed=False, zoom_point=None, preview_size=None):
         super().__init__()
         self.full_rgb=full_rgb
         self.adj=adj
@@ -36,6 +36,9 @@ class PreviewWorker(QRunnable):
         self.req_id=req_id
         self.live = live  # ถ้าลาก slider อยู่ ใช้พรีวิวเบา
         self.base_override = base_override  # ใช้ภาพที่ resize มาแล้ว ถ้ามี
+        self.is_zoomed = is_zoomed
+        self.zoom_point = zoom_point
+        self.preview_size = preview_size
         self.signals=PreviewSignals()
 
     @classmethod
@@ -54,14 +57,34 @@ class PreviewWorker(QRunnable):
     def run(self):
         if PreviewWorker.is_stale(self.req_id): return
 
-        base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, self.long_edge)
+        if self.is_zoomed and self.mode == "single":
+            h_full, w_full, _ = self.full_rgb.shape
+            preview_w, preview_h = self.preview_size.width(), self.preview_size.height()
+
+            # Calculate the crop area from the full-resolution image
+            # This gives a 1:1 pixel view
+            crop_w, crop_h = preview_w, preview_h
+            center_x = self.zoom_point.x() * w_full
+            center_y = self.zoom_point.y() * h_full
+
+            x0 = int(round(center_x - crop_w / 2))
+            y0 = int(round(center_y - crop_h / 2))
+
+            # Clamp to image boundaries
+            x0 = max(0, min(w_full - crop_w, x0))
+            y0 = max(0, min(h_full - crop_h, y0))
+            
+            base = self.full_rgb[y0:y0+crop_h, x0:x0+crop_w].copy()
+        else:
+            base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, self.long_edge)
+
         if self.mode == "split":
             # copy to keep base intact
             base_local = base
             b = apply_transforms(base.copy(), self.adj)
             # AFTER: แต่งสี + transforms
             src01 = base_local.astype(np.float32)/255.0
-            after01 = pipeline(src01, self.adj)
+            after01 = pipeline(src01, self.adj, fast_mode=self.live)
             a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
             a = apply_transforms(a, self.adj)
 
@@ -79,7 +102,7 @@ class PreviewWorker(QRunnable):
 
         # โหมดปกติ: AFTER อย่างเดียว
         src01 = base.astype(np.float32)/255.0
-        out01 = pipeline(src01, self.adj)
+        out01 = pipeline(src01, self.adj, fast_mode=self.live)
         out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
         out   = apply_transforms(out, self.adj)
         if not self.live:
