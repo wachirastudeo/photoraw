@@ -3,31 +3,89 @@ from PySide6.QtWidgets import (
     QFormLayout, QHBoxLayout, QWidget, QFrame, QLabel, QSlider, QToolButton,
     QListWidget, QListWidgetItem, QAbstractItemView, QLayout, QSizePolicy, QStyle
 )
-from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont
+from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont, QLinearGradient, QBrush, QPen
+
+def create_app_icon(size=64):
+    """Generates a programmatic app icon."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    
+    # Background: Rounded Rect with Gradient
+    grad_bg = QLinearGradient(0, 0, size, size)
+    grad_bg.setColorAt(0.0, QColor("#4338ca")) # Indigo-700
+    grad_bg.setColorAt(1.0, QColor("#312e81")) # Indigo-900
+    
+    painter.setBrush(QBrush(grad_bg))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(0, 0, size, size, size*0.22, size*0.22)
+    
+    # Lens Element: Central Circle
+    center = size / 2
+    radius = size * 0.35
+    
+    grad_lens = QLinearGradient(0, 0, size, size)
+    grad_lens.setColorAt(0.0, QColor("#1e1b4b")) # Indigo-950
+    grad_lens.setColorAt(1.0, QColor("#312e81")) # Indigo-900
+    
+    painter.setBrush(QBrush(grad_lens))
+    painter.setPen(QPen(QColor("#6366f1"), size*0.05)) # Indigo-500 ring
+    painter.drawEllipse(QPoint(center, center), radius, radius)
+    
+    # Reflection/Shine
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(255, 255, 255, 40))
+    painter.drawEllipse(QPoint(center - radius*0.3, center - radius*0.3), radius*0.25, radius*0.25)
+    
+    painter.end()
+    return QIcon(pixmap)
+
+class DoubleClickSlider(QSlider):
+    def __init__(self, orientation, on_double_click=None, parent=None):
+        super().__init__(orientation, parent)
+        self.on_double_click = on_double_click
+
+    def mouseDoubleClickEvent(self, event):
+        if self.on_double_click:
+            self.on_double_click()
+        super().mouseDoubleClickEvent(event)
 
 def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, val: float, step=0.01,
                on_change=None, on_reset=None, color_hex=None, on_press=None, on_release=None):
     row = QHBoxLayout(); row.setContentsMargins(0,0,0,0)
-    sld = QSlider(Qt.Horizontal)
+    
+    # Define reset action
+    def do_reset():
+        sld.blockSignals(True)
+        sld.setValue(int(val/step))
+        sld.blockSignals(False)
+        if on_reset: on_reset(key)
+        # Update label manually since signal was blocked
+        lab.setText(f"{val:.2f}")
+
+    # Use custom DoubleClickSlider
+    sld = DoubleClickSlider(Qt.Horizontal, on_double_click=do_reset)
     sld.setMinimum(int(lo/step)); sld.setMaximum(int(hi/step)); sld.setValue(int(val/step))
     sld.setSingleStep(1); sld.setPageStep(5); sld.setTracking(True)
     if on_press: sld.sliderPressed.connect(on_press)
     if on_release: sld.sliderReleased.connect(on_release)
 
-    # --- [REVISED] สร้าง Gradient Stylesheet ตามประเภทของ Slider ---
+    # --- [REVISED] Create Gradient Stylesheet based on Slider Type ---
     gradient_style = ""
-    # Temperature: Blue -> Yellow
+    # Temperature: Blue -> Yellow/Orange
     if key == "temperature":
-        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #85c1e9, stop:1 #f7dc6f);"
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:0.5 #ffffff, stop:1 #eab308);"
     # Tint: Green -> Magenta
     elif key == "tint":
-        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a3e635, stop:1 #d946ef);"
-    # Saturation / Vibrance: Gray -> Color
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #22c55e, stop:0.5 #ffffff, stop:1 #d946ef);"
+    # Saturation / Vibrance: Gray -> Vibrant Red
     elif key in ("saturation", "vibrance"):
         gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9ca3af, stop:1 #ef4444);"
-    # HSL - Hue
+    # HSL - Hue (Full Spectrum)
     elif key.startswith("h_"):
-        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e11d48, stop:0.17 #f97316, stop:0.33 #eab308, stop:0.5 #22c55e, stop:0.67 #3b82f6, stop:0.83 #a855f7, stop:1 #e11d48);"
+        gradient_style = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff0000, stop:0.16 #ffff00, stop:0.33 #00ff00, stop:0.5 #00ffff, stop:0.66 #0000ff, stop:0.83 #ff00ff, stop:1 #ff0000);"
     # HSL - Saturation
     elif key.startswith("s_") and color_hex:
         gradient_style = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9ca3af, stop:1 {color_hex});"
@@ -35,31 +93,35 @@ def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, 
     elif key.startswith("l_") and color_hex:
         gradient_style = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #000000, stop:0.5 {color_hex}, stop:1 #ffffff);"
 
-    # กำหนด Stylesheet ให้กับ Slider ถ้ามี Gradient ที่ต้องใช้
+    # Apply Stylesheet if Gradient exists
     if gradient_style:
         sld.setStyleSheet(f"""
             QSlider::groove:horizontal {{
-                border: 1px solid #cbd5e1;
-                height: 8px;
+                border: 1px solid #52525b;
+                height: 6px;
                 background: {gradient_style};
                 margin: 2px 0;
-                border-radius: 4px;
+                border-radius: 3px;
             }}
             QSlider::handle:horizontal {{
-                background: #ffffff;
-                border: 1px solid #94a3b8;
+                background: #f4f4f5;
+                border: 1px solid #52525b;
                 width: 14px;
                 height: 14px;
-                margin: -4px 0; /* ปรับ Handle ให้อยู่ตรงกลาง Groove */
-                border-radius: 8px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }}
+            /* IMPORTANT: Make sub-page transparent to show the gradient groove */
+            QSlider::sub-page:horizontal {{
+                background: transparent;
             }}
         """)
-    # --- จบส่วนที่แก้ไข ---
+    # --- End Revised Section ---
 
     lab = QLabel(f"{val:.2f}")
     sld.valueChanged.connect(lambda v: (lab.setText(f"{v*step:.2f}"), on_change and on_change(key, v*step)))
     btn = QToolButton(); btn.setText("↺"); btn.setToolTip("Reset")
-    btn.clicked.connect(lambda: (sld.blockSignals(True), sld.setValue(int(val/step)), sld.blockSignals(False), on_reset and on_reset(key)))
+    btn.clicked.connect(do_reset)
     row.addWidget(sld); row.addWidget(lab); row.addWidget(btn)
     form.addRow(title_widget, row)
     return sld, lab

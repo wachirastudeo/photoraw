@@ -5,15 +5,16 @@ from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, QLocale
 from PySide6.QtWidgets import ( # NOQA
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QGroupBox, QFormLayout, QMessageBox, QComboBox, QProgressDialog,
-    QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea
+    QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea,
+    QMainWindow, QToolBar, QMenuBar, QMenu
 ) # NOQA
-from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath
+from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction
 
 from catalog import load_catalog, save_catalog, DEFAULT_ROOT
 from imaging import DEFAULTS
 from PySide6.QtCore import QEvent, QPoint, QPointF
 from workers import DecodeWorker, PreviewWorker, ExportWorker
-from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout
+from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout, create_app_icon
 from export_dialog import ExportOptionsDialog
 from cropper import CropDialog
 from PySide6.QtWidgets import QInputDialog, QListWidget, QDialogButtonBox
@@ -24,10 +25,22 @@ _COLOR_SWATCH = {
 }
 _COLORS = ["red","orange","yellow","green","aqua","blue","purple","magenta"]
 
-class Main(QWidget):
+class Main(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NinLab")
+        self.setWindowTitle("Ninlab")
+        
+        # Load icon from file
+        icon_path = Path(__file__).parent / "icon.ico"
+        if icon_path.exists():
+            from PySide6.QtGui import QIcon
+            app_icon = QIcon(str(icon_path))
+            self.setWindowIcon(app_icon)
+            QApplication.setWindowIcon(app_icon)
+        
+        self.resize(1400, 900)
+        
+        # --- [REVISED] Initialize Data Structures ---
         self._apply_app_theme()
         QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
         self.pool=QThreadPool.globalInstance()
@@ -58,97 +71,103 @@ class Main(QWidget):
         self.pan_origin = None
         self._is_panning = False
 
-        root=QVBoxLayout(self)
+        # Central Widget setup
+        self.cw = QWidget()
+        self.setCentralWidget(self.cw)
+        root=QVBoxLayout(self.cw)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        def make_labeled_block(text, widget, stretch=False):
-            block = QWidget(); row = QHBoxLayout(block)
-            row.setContentsMargins(0,0,0,0); row.setSpacing(4)
-            lab = QLabel(text); row.addWidget(lab)
-            row.addWidget(widget)
-            if stretch:
-                row.addStretch(1)
-                block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            else:
-                block.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            return block
-
-        # top bar 1 (ไฟล์/พรีวิว/ฟิลเตอร์) — flow layout to wrap controls automatically
-        toolbar1=FlowLayout()
-        btnOpen=QPushButton("Open"); btnOpen.clicked.connect(self.open_files)
-        btnDelete=QPushButton("Delete Selected"); btnDelete.clicked.connect(self.delete_selected)
-        btnStar=QPushButton("★ Star"); btnStar.setToolTip("Toggle Star for selected images"); btnStar.clicked.connect(self.toggle_star_selected)
-        self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred"]); self.filterBox.currentTextChanged.connect(self.apply_filter)
-        btnProjNew=QPushButton("New Project"); btnProjNew.clicked.connect(self.new_project)
-        btnProjOpen=QPushButton("Switch Project"); btnProjOpen.clicked.connect(self.switch_project)
+        # --- Top Layout (Row 1: Project, File, View) ---
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        
+        # Project Info
         self.lab_project = QLabel(self.project_dir.name)
-        self.lab_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.lab_project.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        project_block = QWidget(); proj_row = QHBoxLayout(project_block)
-        proj_row.setContentsMargins(0,0,0,0); proj_row.setSpacing(4)
-        proj_row.addWidget(QLabel("Project:"))
-        proj_row.addWidget(self.lab_project, 1)
-        project_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.lab_project.setStyleSheet("font-weight:bold; color:#e0e7ff; padding:0 4px;")
+        row1.addWidget(QLabel("Proj:"))
+        row1.addWidget(self.lab_project)
+        
+        # File Actions
+        btnNew = QPushButton("New"); btnNew.setToolTip("New Project"); btnNew.clicked.connect(self.new_project)
+        btnSwitch = QPushButton("Switch"); btnSwitch.setToolTip("Switch Project"); btnSwitch.clicked.connect(self.switch_project)
+        btnOpen = QPushButton("Open Images"); btnOpen.clicked.connect(self.open_files)
+        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnOpen.setFixedWidth(100)
+        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnOpen)
+        
+        # View Actions
+        row1.addStretch(1) # Spacer
+        
+        self.btnZoomFit = QPushButton("Fit"); self.btnZoomFit.setCheckable(True); self.btnZoomFit.setChecked(True)
+        self.btnZoomFit.clicked.connect(self.zoom_fit); self.btnZoomFit.setFixedWidth(50)
+        
+        self.btnZoom100 = QPushButton("100%"); self.btnZoom100.setCheckable(True)
+        self.btnZoom100.clicked.connect(self.zoom_100); self.btnZoom100.setFixedWidth(60)
+        
+        self.btnSplit = QPushButton("Split View"); self.btnSplit.setCheckable(True)
+        self.btnSplit.clicked.connect(self.toggle_split); self.btnSplit.setFixedWidth(80)
+        
+        row1.addWidget(self.btnZoomFit); row1.addWidget(self.btnZoom100); row1.addWidget(self.btnSplit)
+        
+        # Filter
+        row1.addWidget(QLabel("  Filter:"))
+        self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred"])
+        self.filterBox.currentTextChanged.connect(self.apply_filter)
+        row1.addWidget(self.filterBox)
 
-        toolbar1.addWidget(btnOpen); toolbar1.addWidget(btnDelete); toolbar1.addWidget(btnStar)
-        toolbar1.addWidget(btnProjNew); toolbar1.addWidget(btnProjOpen)
-        toolbar1.addWidget(project_block)
-        toolbar1.addWidget(make_labeled_block("Filter:", self.filterBox))
+        # Preview Size & Sharpness
+        row1.addWidget(QLabel("  Size:"))
         self.cmb_prev = QComboBox(); self.cmb_prev.addItems(["540","720","900","1200"]); self.cmb_prev.setCurrentText("900")
+        self.cmb_prev.setToolTip("Preview Size (px)")
+        self.cmb_prev.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
+        row1.addWidget(self.cmb_prev)
+        
+        row1.addWidget(QLabel("  Sharp:"))
         self.cmb_sharp = QComboBox(); self.cmb_sharp.addItems(["0.00","0.15","0.30","0.45","0.60","0.80","1.00"])
         self.cmb_sharp.setCurrentText("0.30")
-        toolbar1.addWidget(make_labeled_block("Preview Size", self.cmb_prev))
-        toolbar1.addWidget(make_labeled_block("Sharpness", self.cmb_sharp))
-        root.addLayout(toolbar1)
-
-        # จำค่า UI เมื่อเปลี่ยน + รีเฟรชพรีวิว
-        self.cmb_prev.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
+        self.cmb_sharp.setToolTip("Preview Sharpness")
         self.cmb_sharp.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
-        self._apply_ui_from_catalog()
-
-        # top bar 2 (Export/BeforeAfter/Transform/Preset) with flow layout so it wraps as needed
-        toolbar2=FlowLayout()
-
-        btnExportSel=QPushButton("Export Selected"); btnExportSel.clicked.connect(self.export_selected)
-        btnExportAll=QPushButton("Export All"); btnExportAll.clicked.connect(self.export_all)
-        btnExportFilt=QPushButton("Export (Filtered)"); btnExportFilt.clicked.connect(self.export_filtered)
-
-        btnReset=QPushButton("Reset All Settings"); btnReset.clicked.connect(self.reset_all_settings)
-        btnUndo=QPushButton("Undo"); btnUndo.clicked.connect(self.undo_last)
-        btnRedo=QPushButton("Redo"); btnRedo.clicked.connect(self.redo_last)
-        btnCopy=QPushButton("Copy Settings"); btnCopy.clicked.connect(self.copy_settings)
-        btnPaste=QPushButton("Paste Settings"); btnPaste.clicked.connect(self.paste_settings)
-        btnSavePreset=QPushButton("Save Preset"); btnSavePreset.clicked.connect(self.save_preset_dialog)
-        btnApplyPreset=QPushButton("Apply Preset"); btnApplyPreset.clicked.connect(self.apply_preset_dialog)
+        row1.addWidget(self.cmb_sharp)
         
-        btnBA=QPushButton("Before/After (Split)"); btnBA.setCheckable(True)
-        btnBA.clicked.connect(self.toggle_split)
-        self.btnBA = btnBA
+        root.addLayout(row1)
 
-        # Transform tools
+        # --- Bottom Layout (Row 2: Edit, Tools, Export) ---
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        
+        # Edit
+        btnUndo = QPushButton("Undo"); btnUndo.clicked.connect(self.undo_last)
+        btnRedo = QPushButton("Redo"); btnRedo.clicked.connect(self.redo_last)
+        btnReset = QPushButton("Reset All"); btnReset.clicked.connect(self.reset_all_settings)
+        row2.addWidget(btnUndo); row2.addWidget(btnRedo); row2.addWidget(btnReset)
+        
+        # Copy/Paste
+        btnCopy = QPushButton("Copy"); btnCopy.setToolTip("Copy Settings"); btnCopy.clicked.connect(self.copy_settings)
+        btnPaste = QPushButton("Paste"); btnPaste.setToolTip("Paste Settings"); btnPaste.clicked.connect(self.paste_settings)
+        row2.addWidget(btnCopy); row2.addWidget(btnPaste)
+        
+        # Tools (Icons)
         btnRotL=QToolButton(); btnRotL.setText("⟲"); btnRotL.setToolTip("Rotate Left"); btnRotL.clicked.connect(lambda: self.bump_rotate(-90))
         btnRotR=QToolButton(); btnRotR.setText("⟳"); btnRotR.setToolTip("Rotate Right"); btnRotR.clicked.connect(lambda: self.bump_rotate(+90))
         btnFlip=QToolButton(); btnFlip.setText("↔"); btnFlip.setToolTip("Flip Horizontal"); btnFlip.clicked.connect(self.toggle_flip_h)
         btnCrop=QPushButton("Crop"); btnCrop.clicked.connect(self.do_crop_dialog)
+        btnStar=QPushButton("★ Star"); btnStar.clicked.connect(self.toggle_star_selected)
+        
+        row2.addWidget(btnRotL); row2.addWidget(btnRotR); row2.addWidget(btnFlip); row2.addWidget(btnCrop)
+        row2.addWidget(btnStar)
+        
+        row2.addStretch(1)
+        
+        # Export
+        btnExpSel = QPushButton("Export Selected"); btnExpSel.clicked.connect(self.export_selected)
+        btnExpAll = QPushButton("Export All"); btnExpAll.clicked.connect(self.export_all)
+        row2.addWidget(btnExpSel); row2.addWidget(btnExpAll)
+        
+        root.addLayout(row2)
 
-        # Zoom tools
-        self.btnZoomFit = QPushButton("Fit"); self.btnZoomFit.setCheckable(True); self.btnZoomFit.setChecked(True)
-        self.btnZoom100 = QPushButton("1:1"); self.btnZoom100.setCheckable(True)
-        self.btnZoomFit.clicked.connect(self.zoom_fit)
-        self.btnZoom100.clicked.connect(self.zoom_100)
-
-        for btn in (btnExportSel, btnExportAll, btnExportFilt, btnReset):
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            btn.setMinimumWidth(120)
-
-        for widget in (
-            btnExportSel, btnExportAll, btnExportFilt, btnReset, btnUndo, btnRedo,
-            btnCopy, btnPaste, btnSavePreset, btnApplyPreset, btnBA,
-            btnRotL, btnRotR, btnFlip, btnCrop, self.btnZoomFit, self.btnZoom100
-        ):
-            toolbar2.addWidget(widget)
-        root.addLayout(toolbar2)
+        # Remember UI settings
+        # Remember UI settings
+        self._apply_ui_from_catalog()
 
         # content
         content=QHBoxLayout()
@@ -198,50 +217,65 @@ class Main(QWidget):
         self.debounce.timeout.connect(self._debounced_actions)
         self.pan_update_timer = QTimer(self); self.pan_update_timer.setSingleShot(True)
         self.pan_update_timer.timeout.connect(self._refresh_zoom_preview)
-        self.setStyleSheet("""
-            QWidget{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size:12px; color:#f4f4f5; }
+        # Determine font based on platform to avoid "missing font family" warnings
+        font_family = ".AppleSystemUIFont" if sys.platform == "darwin" else "Segoe UI"
+        self.setStyleSheet(f"""
+            QWidget{{ font-family: "{font_family}", Helvetica, Arial; font-size:12px; color:#f4f4f5; }}
+            
+            /* Toolbar */
+            QToolBar {{ background:#27272a; border-bottom:1px solid #3f3f46; spacing:6px; padding:4px; }}
+            QToolBar::separator {{ background:#3f3f46; width:1px; margin:4px 8px; }}
+            
+            /* MenuBar */
+            QMenuBar {{ background:#18181b; border-bottom:1px solid #3f3f46; }}
+            QMenuBar::item {{ background:transparent; padding:6px 10px; }}
+            QMenuBar::item:selected {{ background:#3f3f46; border-radius:4px; }}
+            QMenu {{ background:#27272a; border:1px solid #3f3f46; padding:4px; }}
+            QMenu::item {{ padding:6px 24px 6px 12px; border-radius:4px; }}
+            QMenu::item:selected {{ background:#4f46e5; color:white; }}
+            QMenu::separator {{ height:1px; background:#3f3f46; margin:4px 0; }}
             
             /* GroupBox */
-            QGroupBox{ border:1px solid #3f3f46; border-radius:8px; padding:12px 10px 10px 10px; background:#27272a; margin-top:8px; }
-            QGroupBox::title{ subcontrol-origin: margin; left:10px; padding:0 4px; color:#a1a1aa; font-weight:600; background:#27272a; }
+            QGroupBox{{ border:1px solid #3f3f46; border-radius:8px; padding:12px 10px 10px 10px; background:#27272a; margin-top:8px; }}
+            QGroupBox::title{{ subcontrol-origin: margin; left:10px; padding:0 4px; color:#a1a1aa; font-weight:600; background:#27272a; }}
             
             /* Buttons */
-            QPushButton, QToolButton { 
+            QPushButton, QToolButton {{ 
                 background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:6px 12px; color:#f4f4f5; 
-            }
-            QPushButton:hover, QToolButton:hover { background:#52525b; border-color:#71717a; }
-            QPushButton:pressed, QToolButton:pressed { background:#27272a; border-color:#52525b; }
-            QPushButton:checked, QToolButton:checked { background:#4f46e5; border-color:#4338ca; color:white; }
-            QToolButton { font-size: 16px; padding: 4px 8px; }
+            }}
+            QPushButton:hover, QToolButton:hover {{ background:#52525b; border-color:#71717a; }}
+            QPushButton:pressed, QToolButton:pressed {{ background:#27272a; border-color:#52525b; }}
+            QPushButton:checked, QToolButton:checked {{ background:#4f46e5; border-color:#4338ca; color:white; }}
+            QToolButton {{ font-size: 16px; padding: 4px 8px; }}
             
             /* Sliders */
-            QSlider::groove:horizontal { border:1px solid #3f3f46; height:4px; background:#18181b; margin:2px 0; border-radius:2px; }
-            QSlider::handle:horizontal { background:#818cf8; border:1px solid #6366f1; width:14px; height:14px; margin:-6px 0; border-radius:7px; }
-            QSlider::handle:horizontal:hover { background:#a5b4fc; }
-            QSlider::sub-page:horizontal { background:#6366f1; border-radius:2px; }
+            QSlider::groove:horizontal {{ border:1px solid #3f3f46; height:4px; background:#18181b; margin:2px 0; border-radius:2px; }}
+            QSlider::handle:horizontal {{ background:#818cf8; border:1px solid #6366f1; width:14px; height:14px; margin:-6px 0; border-radius:7px; }}
+            QSlider::handle:horizontal:hover {{ background:#a5b4fc; }}
+            QSlider::sub-page:horizontal {{ background:#6366f1; border-radius:2px; }}
             
             /* Tabs */
-            QTabWidget::pane{ border:1px solid #3f3f46; border-radius:8px; background:#27272a; top:-1px; }
-            QTabBar::tab{ 
+            QTabWidget::pane{{ border:1px solid #3f3f46; border-radius:8px; background:#27272a; top:-1px; }}
+            QTabBar::tab{{ 
                 padding:8px 16px; border:1px solid transparent; border-bottom:2px solid transparent; 
                 background:transparent; color:#a1a1aa; font-weight:500;
-            }
-            QTabBar::tab:selected{ color:#f4f4f5; border-bottom:2px solid #6366f1; }
-            QTabBar::tab:hover{ color:#e4e4e7; }
+            }}
+            QTabBar::tab:selected{{ color:#f4f4f5; border-bottom:2px solid #6366f1; }}
+            QTabBar::tab:hover{{ color:#e4e4e7; }}
             
             /* ComboBox */
-            QComboBox { background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:4px 8px; color:#f4f4f5; }
-            QComboBox::drop-down { border:0px; }
-            QComboBox QAbstractItemView { background:#27272a; border:1px solid #52525b; selection-background-color:#4f46e5; color:#f4f4f5; }
+            QComboBox {{ background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:4px 8px; color:#f4f4f5; }}
+            QComboBox::drop-down {{ border:0px; }}
+            QComboBox QAbstractItemView {{ background:#27272a; border:1px solid #52525b; selection-background-color:#4f46e5; color:#f4f4f5; }}
             
             /* ScrollArea */
-            QScrollArea { border:0px; background:transparent; }
-            QScrollBar:vertical { border:0px; background:#18181b; width:10px; margin:0; }
-            QScrollBar::handle:vertical { background:#52525b; min-height:20px; border-radius:5px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+            QScrollArea {{ border:0px; background:transparent; }}
+            QScrollBar:vertical {{ border:0px; background:#18181b; width:10px; margin:0; }}
+            QScrollBar::handle:vertical {{ background:#52525b; min-height:20px; border-radius:5px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0px; }}
             
-            QLabel{ background:transparent; }
-            QDialog { background:#18181b; }
+            QLabel{{ background:transparent; }}
+            QDialog {{ background:#18181b; }}
         """)
         if seeded:
             self._refresh_preset_list()
@@ -307,6 +341,16 @@ class Main(QWidget):
         btn_apply=QPushButton("Apply to Selected"); btn_apply.clicked.connect(self._apply_selected_preset)
         btn_all=QPushButton("Apply to All Loaded"); btn_all.clicked.connect(self.apply_preset_all)
         btn_filt=QPushButton("Apply to Filtered"); btn_filt.clicked.connect(self.apply_preset_filtered)
+        # Removed old toolbar2 buttons as they are now in Menu/Toolbar
+        # btnPaste=QPushButton("Paste Settings"); btnPaste.clicked.connect(self.paste_settings)
+        # btnCopy=QPushButton("Copy Settings"); btnCopy.clicked.connect(self.copy_settings)
+        # btnUndo=QPushButton("Undo"); btnUndo.clicked.connect(self.undo_last)
+        # btnRedo=QPushButton("Redo"); btnRedo.clicked.connect(self.redo_last)
+        # btnSavePreset=QPushButton("Save Preset"); btnSavePreset.clicked.connect(self.save_preset_dialog)
+        # btnApplyPreset=QPushButton("Apply Preset"); btnApplyPreset.clicked.connect(self._apply_selected_preset)
+        # btnExportSel=QPushButton("Export Selected"); btnExportSel.clicked.connect(self.export_selected)
+        # btnExportAll=QPushButton("Export All"); btnExportAll.clicked.connect(self.export_all)
+        # btnExportFilt=QPushButton("Export Filtered"); btn_filt.clicked.connect(self.apply_preset_filtered) # This line was already present, just moved the comment
         btn_del=QPushButton("Delete"); btn_del.clicked.connect(self.delete_selected_preset)
         for btn in (btn_save, btn_apply, btn_all, btn_filt, btn_del):
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -464,6 +508,10 @@ class Main(QWidget):
         }
         self.catalog["__presets__"] = self.presets
         save_catalog(self.catalog, self.project_dir)
+
+
+        
+
 
     def _apply_app_theme(self):
         # Use a flat Fusion style on macOS to avoid Aqua spacing/truncation issues
@@ -726,6 +774,29 @@ class Main(QWidget):
 
     def _apply_preset_by_item(self, item):
         if not item: return
+        
+        # Check for toggle-off (if clicking the already active preset)
+        preset_name = item.text()
+        if self.current >= 0:
+            it = self.items[self.current]
+            if it.get("applied_preset") == preset_name:
+                # Toggle OFF: Reset to defaults but preserve transforms
+                self._push_undo(it)
+                from imaging import DEFAULTS
+                # Keep crop, rotate, flip_h
+                transforms = {k: it["settings"][k] for k in ("crop", "rotate", "flip_h") if k in it["settings"]}
+                it["settings"] = DEFAULTS.copy()
+                it["settings"].update(transforms)
+                it["applied_preset"] = None
+                
+                self._persist_current_item()
+                self.load_settings_to_ui()
+                self._kick_preview_thread(force=True)
+                self.update_status(f"Removed preset '{preset_name}'")
+                self._mark_active_preset(None)
+                self.lst_presets.clearSelection()
+                return
+
         self._apply_selected_preset()
 
     def _apply_selected_preset(self):
@@ -826,7 +897,7 @@ class Main(QWidget):
             if matches:
                 self.lst_presets.setCurrentItem(matches[0])
 
-    def _push_undo(self, it):
+    def _push_undo(self, it, clear_redo=True):
         name = it.get("name", None)
         if not name: return
         self.undo_stack.setdefault(name, [])
@@ -838,8 +909,9 @@ class Main(QWidget):
         if len(stack) > 20:
             stack.pop(0)
         # reset redo when new action happens
-        self.redo_stack.setdefault(name, [])
-        self.redo_stack[name].clear()
+        if clear_redo:
+            self.redo_stack.setdefault(name, [])
+            self.redo_stack[name].clear()
         # active preset/applied preset no longer valid after manual tweak
         it["applied_preset"] = None
         self._mark_active_preset(None)
@@ -864,8 +936,8 @@ class Main(QWidget):
         it=self.items[self.current]; name=it["name"]
         rstack=self.redo_stack.get(name, [])
         if not rstack: return
-        # push current to undo
-        self._push_undo(it)
+        # push current to undo, but DO NOT clear redo stack because we are consuming it
+        self._push_undo(it, clear_redo=False)
         next_state = rstack.pop()
         it["settings"] = {**DEFAULTS, **next_state}
         self._persist_current_item()
