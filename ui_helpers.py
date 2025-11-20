@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QHBoxLayout, QWidget, QFrame, QLabel, QSlider, QToolButton,
     QListWidget, QListWidgetItem, QAbstractItemView, QLayout, QSizePolicy, QStyle
 )
-from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont, QLinearGradient, QBrush, QPen
+from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont, QLinearGradient, QBrush, QPen, QPainterPath
 
 def create_app_icon(size=64):
     """Generates a programmatic app icon."""
@@ -50,7 +50,9 @@ class DoubleClickSlider(QSlider):
     def mouseDoubleClickEvent(self, event):
         if self.on_double_click:
             self.on_double_click()
-        super().mouseDoubleClickEvent(event)
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
 def add_slider(form: QFormLayout, title_widget, key: str, lo: float, hi: float, val: float, step=0.01,
                on_change=None, on_reset=None, color_hex=None, on_press=None, on_release=None):
@@ -147,9 +149,37 @@ def filmstrip_add_item(listwidget, thumb_pixmap, userdata):
 def badge_star(pixmap: QPixmap, starred: bool) -> QPixmap:
     if not starred: return pixmap
     pm=QPixmap(pixmap); p=QPainter(pm); p.setRenderHint(QPainter.Antialiasing, True)
-    r=12; p.setBrush(QColor(255,215,0)); p.setPen(Qt.NoPen); p.drawEllipse(3,3,r,r)
-    p.setPen(QColor(30,30,30)); font=QFont(); font.setPointSize(8); font.setBold(True); p.setFont(font)
-    p.drawText(3,3,r,r,Qt.AlignCenter,"★"); p.end(); return pm
+    
+    # Minimal Vector Star
+    star_path = QPainterPath()
+    cx, cy = 12, 12  # Center position
+    outer_radius = 8
+    inner_radius = 4
+    angle = -90 # Start at top
+    
+    import math
+    points = []
+    for i in range(10):
+        r = outer_radius if i % 2 == 0 else inner_radius
+        rad = math.radians(angle + i * 36)
+        x = cx + r * math.cos(rad)
+        y = cy + r * math.sin(rad)
+        if i == 0: star_path.moveTo(x, y)
+        else: star_path.lineTo(x, y)
+    star_path.closeSubpath()
+
+    # Drop shadow for visibility on light backgrounds
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(0, 0, 0, 80))
+    p.translate(1, 1)
+    p.drawPath(star_path)
+    
+    # Main Star
+    p.translate(-1, -1)
+    p.setBrush(QColor("#FFD700")) # Gold
+    p.drawPath(star_path)
+    
+    p.end(); return pm
 
 def qimage_from_u8(arr):
     h,w,_=arr.shape

@@ -149,6 +149,25 @@ class CropDialog(QDialog):
             self._current = self.adjust_rect_aspect(self._current, self.aspect_ratio)
             self.overlay.set_crop_rect(self._current)
 
+    def adjust_rect_aspect(self, rect, ratio):
+        """Adjust rectangle dimensions to match aspect ratio"""
+        if ratio is None: return rect
+        w, h = rect.width(), rect.height()
+        if w == 0 or h == 0: return rect
+        
+        current_ratio = w / h
+        
+        if current_ratio > ratio:
+            # Current is wider than target -> reduce width
+            new_w = int(h * ratio)
+            new_h = h
+        else:
+            # Current is taller than target -> reduce height
+            new_w = w
+            new_h = int(w / ratio)
+            
+        return QRect(rect.x(), rect.y(), new_w, new_h)
+
     def reset_all(self):
         """รีเซ็ตค่าทั้งหมดกลับไปที่ค่าเริ่มต้น"""
         self._current = QRect()  # Reset the crop rectangle

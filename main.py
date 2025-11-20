@@ -8,7 +8,7 @@ from PySide6.QtWidgets import ( # NOQA
     QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea,
     QMainWindow, QToolBar, QMenuBar, QMenu, QListWidgetItem, QInputDialog, QDialogButtonBox
 ) # NOQA
-from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction
+from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction, QIcon
 
 from catalog import load_catalog, save_catalog, DEFAULT_ROOT, load_projects_meta, update_project_info
 from imaging import DEFAULTS
@@ -40,38 +40,36 @@ class Main(QMainWindow):
         
         self.resize(1400, 900)
         
-        # --- [REVISED] Initialize Data Structures ---
+        # --- Initialize Project BEFORE creating UI ---
         self._apply_app_theme()
         self.create_menus()
         QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
         self.pool=QThreadPool.globalInstance()
 
-        # project / catalog
+        # Load project data
         self.project_dir = self._load_last_project()
         self.project_display_name = self._get_project_display_name()
         self.catalog = load_catalog(self.project_dir)
-        # state
-        self.items=[]; self.current=-1; self.view_filter="All"
-        self.split_mode = False
-        self.sliders={}
+        self.presets = self.catalog.get("__presets__", {})
+        
+        self.undo_stack={}; self.redo_stack={}
+        self.items=[]; self.current=-1; self.view_filter="All"; self.split_mode=False
+        self._clipboard=None; self.active_preset=None; self.live_dragging=False; self.live_inflight=False
+        self._export_workers=[]; self.expdlg=None; self.last_export_opts=None
         self.to_load=0; self.loaded=0
-        self.expdlg=None; self.last_export_opts=None
-        self._export_workers=[]
-        self.presets = self.catalog.get("__presets__", {})  # name -> settings dict
-        self.undo_stack = {}  # name -> list of settings snapshots (history)
-        self.redo_stack = {}  # name -> redo history per image
-        self.active_preset = None
+        self._last_preview_qimg = None
         self.hsl_scroll = None; self.hsl_content = None
         self.preset_scroll = None; self.preset_content = None
-        seeded = self._seed_default_presets()
-        self.copied_settings = None  # สำหรับ copy/paste settings รายภาพ
-        self.live_dragging = False
-        self.live_inflight = False
+        self.sliders={}
+        
         # Zoom/Pan state
         self.is_zoomed = False
-        self.zoom_point_norm = QPointF(0.5, 0.5) # Normalized coords on full image
+        self.zoom_point_norm = QPointF(0.5, 0.5)
         self.pan_origin = None
         self._is_panning = False
+        self.pan_update_timer = QTimer()
+        self.pan_update_timer.setSingleShot(True)
+        self.pan_update_timer.timeout.connect(lambda: self._kick_preview_thread(force=True))
 
         # Central Widget setup
         self.cw = QWidget()
@@ -107,8 +105,8 @@ class Main(QMainWindow):
         self.btnZoom100 = QPushButton("100%"); self.btnZoom100.setCheckable(True)
         self.btnZoom100.clicked.connect(self.zoom_100); self.btnZoom100.setFixedWidth(60)
         
-        self.btnSplit = QPushButton("Split View"); self.btnSplit.setCheckable(True)
-        self.btnSplit.clicked.connect(self.toggle_split); self.btnSplit.setFixedWidth(80)
+        self.btnSplit = QPushButton("Before/After"); self.btnSplit.setCheckable(True)
+        self.btnSplit.clicked.connect(self.toggle_split); self.btnSplit.setFixedWidth(100)
         
         row1.addWidget(self.btnZoomFit); row1.addWidget(self.btnZoom100); row1.addWidget(self.btnSplit)
         
@@ -120,7 +118,7 @@ class Main(QMainWindow):
 
         # Preview Size & Sharpness
         row1.addWidget(QLabel("  Size:"))
-        self.cmb_prev = QComboBox(); self.cmb_prev.addItems(["540","720","900","1200"]); self.cmb_prev.setCurrentText("900")
+        self.cmb_prev = QComboBox(); self.cmb_prev.addItems(["540","720","900","1200","1600","2048"]); self.cmb_prev.setCurrentText("1200")
         self.cmb_prev.setToolTip("Preview Size (px)")
         self.cmb_prev.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
         row1.addWidget(self.cmb_prev)
@@ -280,8 +278,13 @@ class Main(QMainWindow):
             QLabel{{ background:transparent; }}
             QDialog {{ background:#18181b; }}
         """)
+        seeded = self._seed_default_presets()
         if seeded:
             self._refresh_preset_list()
+        
+        # Restore images from the loaded project
+        self._restore_project_images()
+        
         self.showMaximized()
 
     # ------- groups -------
@@ -399,7 +402,15 @@ class Main(QMainWindow):
         return g
 
     def group_effects(self):
+        from curve_widget import CurveWidget
         g=QGroupBox("Effects"); f=QFormLayout(g)
+        
+        # Curve Widget
+        curve_label = QLabel("Tone Curve:")
+        self.curve_widget = CurveWidget()
+        self.curve_widget.curveChanged.connect(self._on_curve_changed)
+        f.addRow(curve_label, self.curve_widget)
+        
         s,l=add_slider(f, QLabel("Clarity"), "clarity", -1,1,DEFAULTS["clarity"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["clarity"]={"s":s,"l":l,"step":0.01}
@@ -571,6 +582,11 @@ class Main(QMainWindow):
         # ลบการตั้งค่าการแปลงภาพที่อาจมีอยู่
         for k in ("crop", "rotate", "flip_h"):
             it["settings"].pop(k, None)
+        
+        # Reset curve widget
+        if hasattr(self, 'curve_widget'):
+            self.curve_widget.reset_curve()
+        
         self._persist_current_item()
         self.load_settings_to_ui()
         self._kick_preview_thread(force=True)
@@ -590,6 +606,10 @@ class Main(QMainWindow):
                 changed = True
         
         if changed:
+            # Reset curve widget if resetting effects tab
+            if "clarity" in keys and hasattr(self, 'curve_widget'):
+                self.curve_widget.reset_curve()
+            
             self._persist_current_item()
             self.load_settings_to_ui()
             self._kick_preview_thread(force=True)
@@ -642,6 +662,16 @@ class Main(QMainWindow):
     def _debounced_actions(self):
         self._kick_preview_thread()
         self._persist_current_item()
+    
+    def _on_curve_changed(self, lut):
+        """Handle curve widget changes"""
+        if self.current < 0: return
+        it = self.items[self.current]
+        self._push_undo(it)
+        self.redo_stack.get(it["name"], []).clear()
+        it["settings"]["curve_lut"] = lut.tolist()
+        self._persist_current_item()
+        self._kick_preview_thread(force=True)
 
     def on_reset_one(self, key):
         if self.current<0: return
@@ -723,6 +753,7 @@ class Main(QMainWindow):
         if not rows: return
         row=rows[0].row(); name=self.film.item(row).data(Qt.UserRole)
         self.current=next((i for i,v in enumerate(self.items) if v["name"]==name),-1)
+        if self.current == -1: return
         # initialize undo stack for this item
         cur_it = self.items[self.current]
         self.undo_stack.setdefault(name, [dict(cur_it["settings"])])
@@ -754,7 +785,10 @@ class Main(QMainWindow):
         self.film.blockSignals(True); self.film.clear()
         for it in self.items:
             if it["thumb"] is None or not self._pass_filter(it): continue
-            pm = QPixmap.fromImage(qimage_from_u8(it["thumb"]))
+            if it.get("thumb_edited"):
+                pm = it["thumb_edited"]
+            else:
+                pm = QPixmap.fromImage(qimage_from_u8(it["thumb"]))
             pm = badge_star(pm, it.get("star",False)); filmstrip_add_item(self.film, pm, userdata=it["name"])
         for i in range(self.film.count()):
             if self.film.item(i).data(Qt.UserRole) in selected: self.film.item(i).setSelected(True)
@@ -1039,7 +1073,7 @@ class Main(QMainWindow):
         if self.live_dragging:
             if self.live_inflight:
                 return
-            use_edge = min(use_edge, 720) # Use a smaller preview for live dragging
+            use_edge = min(use_edge, 1600) # Use a smaller preview for live dragging
 
         base_override = None
         # Zooming is dynamic, don't use cache for it.
@@ -1106,14 +1140,29 @@ class Main(QMainWindow):
         self.pan_update_timer.start(16)
 
     def _show_preview_pix(self, arr):
-        from ui_helpers import qimage_from_u8
+        from ui_helpers import qimage_from_u8, badge_star
         qimg = qimage_from_u8(arr)
         self._last_preview_qimg = qimg
 
-        pm = QPixmap.fromImage(qimg).scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        base_pm = QPixmap.fromImage(qimg)
+        pm = base_pm.scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
         self.preview.setAlignment(Qt.AlignCenter) # Force re-alignment
         self.live_inflight = False
+
+        # Update thumbnail
+        if self.current >= 0:
+            it = self.items[self.current]
+            thumb_pm = base_pm.scaled(72, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            it["thumb_edited"] = thumb_pm
+            
+            name = it["name"]
+            for i in range(self.film.count()):
+                item = self.film.item(i)
+                if item.data(Qt.UserRole) == name:
+                    final_pm = badge_star(thumb_pm, it.get("star", False))
+                    item.setIcon(QIcon(final_pm))
+                    break
 
     def eventFilter(self, obj, event):
         # [REVISED] This logic is designed to be robust for both mouse and trackpad gestures on macOS.
@@ -1249,7 +1298,11 @@ class Main(QMainWindow):
         self.pool.start(w); self.update_status("Exporting ...")
 
     def _on_export_progress(self, done,total):
-        if self.expdlg: self.expdlg.setMaximum(total); self.expdlg.setValue(done); self.expdlg.setLabelText(f"Exporting... {done}/{total}")
+        dlg = self.expdlg
+        if dlg:
+            dlg.setMaximum(total)
+            dlg.setValue(done)
+            dlg.setLabelText(f"Exporting... {done}/{total}")
 
     def _on_export_done(self, out_dir):
         if self.expdlg: self.expdlg.setValue(self.expdlg.maximum()); self.expdlg.close(); self.expdlg=None
@@ -1308,9 +1361,9 @@ class Main(QMainWindow):
         update_project_info(self.project_dir)
 
     def _apply_ui_from_catalog(self):
-        last_ui = self.catalog.get("__ui__", {"preview_size": "900", "sharpness": "0.30"})
+        last_ui = self.catalog.get("__ui__", {"preview_size": "1200", "sharpness": "0.30"})
         try:
-            self.cmb_prev.setCurrentText(last_ui.get("preview_size","900"))
+            self.cmb_prev.setCurrentText(last_ui.get("preview_size","1200"))
             self.cmb_sharp.setCurrentText(last_ui.get("sharpness","0.30"))
         except Exception:
             pass
@@ -1376,15 +1429,21 @@ class Main(QMainWindow):
         self._refresh_preset_list()
         
         # Restore images from catalog
-        # Filter keys that look like file paths (not starting with __)
-        image_files = [k for k in self.catalog.keys() if not k.startswith("__") and Path(k).exists()]
-        if image_files:
-            self.to_load = len(image_files)
+        image_files = [k for k in self.catalog.keys() if not k.startswith("__")]
+        existing_files = []
+        for k in image_files:
+            try:
+                if Path(k).exists():
+                    existing_files.append(k)
+            except Exception:
+                pass
+        
+        if existing_files:
+            self.to_load = len(existing_files)
             self.loaded = 0
-            self.update_status(f"Restoring {len(image_files)} images...")
+            self.update_status(f"Restoring {len(existing_files)} images...")
             
-            for p in image_files:
-                # Create item structure
+            for p in existing_files:
                 item = {"name": p, "full": None, "thumb": None, "settings": DEFAULTS.copy(), "star": False}
                 saved = self.catalog.get(p)
                 if saved:
@@ -1396,11 +1455,45 @@ class Main(QMainWindow):
                 
                 self.items.append(item)
                 
-                # Start decoder for thumbnail
                 w = DecodeWorker(p, thumb_w=72, thumb_h=48)
                 w.signals.done.connect(self._on_decoded)
-                w.signals.error.connect(lambda m: print(f"Error loading {p}: {m}"))
+                w.signals.error.connect(lambda m: print(f"Error loading: {m}"))
                 self.pool.start(w)
+
+    def _restore_project_images(self):
+        """Restore images from the current project's catalog"""
+        image_files = [k for k in self.catalog.keys() if not k.startswith("__")]
+        existing_files = []
+        for k in image_files:
+            try:
+                if Path(k).exists():
+                    existing_files.append(k)
+            except Exception:
+                pass
+        
+        if existing_files:
+            self.to_load = len(existing_files)
+            self.loaded = 0
+            self.update_status(f"Restoring {len(existing_files)} images...")
+            
+            for p in existing_files:
+                item = {"name": p, "full": None, "thumb": None, "settings": DEFAULTS.copy(), "star": False}
+                saved = self.catalog.get(p)
+                if saved:
+                    if isinstance(saved.get("settings"), dict):
+                        item["settings"] = {**DEFAULTS, **saved["settings"]}
+                    item["star"] = bool(saved.get("star", False))
+                    if "preset" in saved:
+                        item["applied_preset"] = saved.get("preset")
+                
+                self.items.append(item)
+                
+                w = DecodeWorker(p, thumb_w=72, thumb_h=48)
+                w.signals.done.connect(self._on_decoded)
+                w.signals.error.connect(lambda m: print(f"Error loading: {m}"))
+                self.pool.start(w)
+
+
 
     def create_menus(self):
         bar = self.menuBar()
@@ -1466,6 +1559,7 @@ class Main(QMainWindow):
         action_paste.setShortcut("Ctrl+V")
         action_paste.triggered.connect(self.paste_settings)
         edit_menu.addAction(action_paste)
+
 
     def new_project(self):
         # Ask for project name

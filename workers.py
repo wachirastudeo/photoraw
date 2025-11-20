@@ -12,6 +12,8 @@ class DecodeWorker(QRunnable):
         super().__init__()
         self.path=path; self.thumb_w=thumb_w; self.thumb_h=thumb_h
         self.signals=DecodeSignals()
+        # Prevent the QRunnable from being auto-deleted before signals are emitted
+        self.setAutoDelete(False)
     def run(self):
         try:
             full, thumb = decode_image(self.path, (self.thumb_w, self.thumb_h))
@@ -40,6 +42,8 @@ class PreviewWorker(QRunnable):
         self.zoom_point = zoom_point
         self.preview_size = preview_size
         self.signals=PreviewSignals()
+        # Prevent the QRunnable from being auto-deleted before signals are emitted
+        self.setAutoDelete(False)
 
     @classmethod
     def next_id(cls):
@@ -91,6 +95,11 @@ class PreviewWorker(QRunnable):
             if not self.live:
                 b = preview_sharpen(b, self.sharpen_amt)
                 a = preview_sharpen(a, self.sharpen_amt)
+            else:
+                # Apply sharpening even in live mode for better perceived quality
+                # It's a simple 3x3 convolution on a resized image, so it should be fast enough
+                b = preview_sharpen(b, self.sharpen_amt)
+                a = preview_sharpen(a, self.sharpen_amt)
 
             h = min(b.shape[0], a.shape[0])
             if b.shape[0]!=h: b = np.array(Image.fromarray(b).resize((b.shape[1], h), Image.BILINEAR))
@@ -105,8 +114,10 @@ class PreviewWorker(QRunnable):
         out01 = pipeline(src01, self.adj, fast_mode=self.live)
         out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
         out   = apply_transforms(out, self.adj)
-        if not self.live:
-            out   = preview_sharpen(out, self.sharpen_amt)
+        
+        # Apply sharpening in live mode too
+        out = preview_sharpen(out, self.sharpen_amt)
+            
         if PreviewWorker.is_stale(self.req_id): return
         self.signals.ready.emit(out)
 
@@ -118,6 +129,8 @@ class ExportWorker(QRunnable):
         super().__init__()
         self.items=items; self.out_dir=out_dir; self.opts=opts
         self.signals=ExportSignals()
+        # Prevent the QRunnable from being auto-deleted before signals are emitted
+        self.setAutoDelete(False)
 
     def _resize_long_edge(self, arr, long_edge):
         if not long_edge or long_edge<=0: return arr

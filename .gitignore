@@ -29,6 +29,7 @@ Icon
 Ninlab.zip
 *.dmg
 *.app
+installer_output/
 
 # IDE
 .vscode/

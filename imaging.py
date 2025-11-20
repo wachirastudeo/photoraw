@@ -15,7 +15,7 @@ DEFAULTS = {
     "exposure":0.0,"contrast":0.0,"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0,
     "saturation":0.0,"vibrance":0.0,"temperature":0.0,"tint":0.0,"gamma":1.0,
     "clarity":0.0,"texture":0.0,"mid_contrast":0.0,"dehaze":0.0,"denoise":0.0,
-    "vignette":0.0,"export_sharpen":0.2,
+    "vignette":0.0,"export_sharpen":0.2,"tone_curve":0.0,"curve_lut":None,
     **{f"h_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"s_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"l_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
@@ -80,6 +80,59 @@ def apply_denoise(rgb, amount=0.0):
     mix = w[...,None]
     out = rgb*mix + blur*(1.0-mix)
     return clamp01(rgb*(1.0-amount) + out*amount)
+
+def apply_tone_curve(rgb, curve_amount=0.0):
+    """
+    Apply S-curve tone adjustment
+    curve_amount: -1.0 to 1.0
+    Positive = stronger S-curve (more contrast in midtones)
+    Negative = inverted S-curve (less contrast)
+    """
+    if abs(curve_amount) < 1e-6:
+        return rgb
+    
+    # Create S-curve using a simple polynomial
+    # This creates a smooth curve that boosts highlights and shadows
+    def s_curve(x, strength):
+        # Cubic S-curve: y = 3x^2 - 2x^3 (base)
+        # Adjusted with strength parameter
+        if strength > 0:
+            # Positive: enhance contrast
+            return x + strength * (3 * x**2 - 2 * x**3 - x)
+        else:
+            # Negative: reduce contrast
+            return x + strength * (x - 3 * x**2 + 2 * x**3)
+    
+    out = rgb.copy()
+    for i in range(3):
+        out[..., i] = s_curve(out[..., i], curve_amount)
+    
+    return np.clip(out, 0, 1)
+
+def apply_curve_lut(rgb, lut):
+    """
+    Apply curve using lookup table
+    lut: list/array of 256 elements with values 0-255
+    """
+    if lut is None:
+        return rgb
+    
+    # Convert list to numpy array if needed
+    if isinstance(lut, list):
+        lut = np.array(lut, dtype=np.uint8)
+    
+    # Convert to 0-255 range
+    rgb_int = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+    
+    # Apply LUT to each channel
+    out = np.zeros_like(rgb)
+    for i in range(3):
+        out[..., i] = lut[rgb_int[..., i]]
+    
+    # Convert back to 0-1
+    return out.astype(np.float32) / 255.0
+
+
 
 def apply_vignette(rgb, amount=0.0):
     if abs(amount)<1e-6: return rgb
@@ -175,6 +228,7 @@ def pipeline(rgb01, adj, fast_mode=False):
         x=clamp01(apply_denoise(x, adj["denoise"]))
     x=clamp01(apply_saturation_vibrance(x,adj["saturation"],adj["vibrance"]))
     x=clamp01(apply_contrast_gamma(x,adj["contrast"],adj["gamma"]))
+    x=clamp01(apply_curve_lut(x, adj.get("curve_lut")))
     x=clamp01(apply_mid_contrast(x, adj["mid_contrast"]))
     x=clamp01(apply_clarity(x,adj["clarity"]))
     x=clamp01(apply_texture(x, adj["texture"]))
