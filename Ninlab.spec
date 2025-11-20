@@ -1,18 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('icon.ico', '.')],
-    hiddenimports=['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper'],
+    hiddenimports=['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper', 'curve_widget', 'scipy', 'scipy.interpolate', 'scipy.special', 'scipy.linalg'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
+    optimize=0,
 )
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -31,9 +32,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',
+    icon=['icon.ico'],
 )
-
 coll = COLLECT(
     exe,
     a.binaries,
@@ -43,17 +43,9 @@ coll = COLLECT(
     upx_exclude=[],
     name='Ninlab',
 )
-
 app = BUNDLE(
     coll,
     name='Ninlab.app',
     icon='icon.ico',
-    bundle_identifier='com.ninlab.app',
-    info_plist={
-        'CFBundleName': 'Ninlab',
-        'CFBundleDisplayName': 'Ninlab',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
-        'NSHighResolutionCapable': True,
-    },
+    bundle_identifier=None,
 )
