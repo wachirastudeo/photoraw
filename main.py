@@ -6,18 +6,18 @@ from PySide6.QtWidgets import ( # NOQA
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QGroupBox, QFormLayout, QMessageBox, QComboBox, QProgressDialog,
     QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea,
-    QMainWindow, QToolBar, QMenuBar, QMenu
+    QMainWindow, QToolBar, QMenuBar, QMenu, QListWidgetItem, QInputDialog, QDialogButtonBox
 ) # NOQA
 from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction
 
-from catalog import load_catalog, save_catalog, DEFAULT_ROOT
+from catalog import load_catalog, save_catalog, DEFAULT_ROOT, load_projects_meta, update_project_info
 from imaging import DEFAULTS
 from PySide6.QtCore import QEvent, QPoint, QPointF
 from workers import DecodeWorker, PreviewWorker, ExportWorker
 from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout, create_app_icon
 from export_dialog import ExportOptionsDialog
 from cropper import CropDialog
-from PySide6.QtWidgets import QInputDialog, QListWidget, QDialogButtonBox
+
 
 _COLOR_SWATCH = {
     "red":"#e53935","orange":"#fb8c00","yellow":"#fdd835","green":"#43a047",
@@ -42,11 +42,13 @@ class Main(QMainWindow):
         
         # --- [REVISED] Initialize Data Structures ---
         self._apply_app_theme()
+        self.create_menus()
         QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
         self.pool=QThreadPool.globalInstance()
 
         # project / catalog
         self.project_dir = self._load_last_project()
+        self.project_display_name = self._get_project_display_name()
         self.catalog = load_catalog(self.project_dir)
         # state
         self.items=[]; self.current=-1; self.view_filter="All"
@@ -83,17 +85,18 @@ class Main(QMainWindow):
         row1.setSpacing(8)
         
         # Project Info
-        self.lab_project = QLabel(self.project_dir.name)
+        self.lab_project = QLabel(self.project_display_name)
         self.lab_project.setStyleSheet("font-weight:bold; color:#e0e7ff; padding:0 4px;")
-        row1.addWidget(QLabel("Proj:"))
+        self.lab_project.setToolTip(str(self.project_dir))
+        row1.addWidget(QLabel("Project:"))
         row1.addWidget(self.lab_project)
         
         # File Actions
         btnNew = QPushButton("New"); btnNew.setToolTip("New Project"); btnNew.clicked.connect(self.new_project)
         btnSwitch = QPushButton("Switch"); btnSwitch.setToolTip("Switch Project"); btnSwitch.clicked.connect(self.switch_project)
-        btnOpen = QPushButton("Open Images"); btnOpen.clicked.connect(self.open_files)
-        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnOpen.setFixedWidth(100)
-        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnOpen)
+        btnImport = QPushButton("Import Images"); btnImport.clicked.connect(self.import_images)
+        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnImport.setFixedWidth(120)
+        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnImport)
         
         # View Actions
         row1.addStretch(1) # Spacer
@@ -651,13 +654,26 @@ class Main(QMainWindow):
         self._persist_current_item()
 
     # ------- file ops -------
-    def open_files(self):
+    def import_images(self):
         filt="RAW/Images (*.cr2 *.cr3 *.nef *.arw *.dng *.raf *.rw2 *.orf *.srw *.jpg *.jpeg *.png *.tif *.tiff)"
-        files,_=QFileDialog.getOpenFileNames(self,"Open Files","",filt)
+        files,_=QFileDialog.getOpenFileNames(self,"Import Images","",filt)
         if not files: return
-        self.items.clear(); self.film.clear(); self.current=-1
-        self.to_load=len(files); self.loaded=0; self.update_status()
-        for p in files:
+        
+        # Don't clear items, append instead
+        # self.items.clear(); self.film.clear(); self.current=-1
+        
+        existing_names = {it["name"] for it in self.items}
+        new_files = [f for f in files if f not in existing_names]
+        
+        if not new_files:
+            QMessageBox.information(self, "Info", "All selected files are already imported.")
+            return
+            
+        self.to_load += len(new_files)
+        # self.loaded=0 # Don't reset loaded count, just increment
+        self.update_status(f"Importing {len(new_files)} images...")
+        
+        for p in new_files:
             self.items.append({"name":p,"full":None,"thumb":None,"settings":DEFAULTS.copy(),"star":False})
             saved = self.catalog.get(p)
             if saved:
@@ -666,7 +682,23 @@ class Main(QMainWindow):
                 self.items[-1]["star"] = bool(saved.get("star", False))
                 if "preset" in saved:
                     self.items[-1]["applied_preset"] = saved.get("preset")
-            w=DecodeWorker(p, thumb_w=72, thumb_h=48)
+            else:
+                # Register new file in catalog
+                self.catalog[p] = {
+                    "settings": DEFAULTS.copy(),
+                    "star": False,
+                    "preset": None
+                }
+        
+        # Save catalog immediately to persist the file list
+        save_catalog(self.catalog, self.project_dir)
+            
+        # Start workers for NEW items only
+        # We need to find the index of the new items
+        start_idx = len(self.items) - len(new_files)
+        for i in range(start_idx, len(self.items)):
+            item = self.items[i]
+            w=DecodeWorker(item["name"], thumb_w=72, thumb_h=48)
             w.signals.done.connect(self._on_decoded)
             w.signals.error.connect(lambda m: QMessageBox.warning(self,"Error",m))
             self.pool.start(w)
@@ -1253,22 +1285,27 @@ class Main(QMainWindow):
 
     # ------- project helpers -------
     def _load_last_project(self):
-        cfg = DEFAULT_ROOT / "_meta.json"
-        try:
-            if cfg.exists():
-                data=json.loads(cfg.read_text(encoding="utf-8"))
-                p=data.get("last_project")
-                if p: return Path(p)
-        except Exception:
-            pass
-        return DEFAULT_ROOT / "default"
+        meta = load_projects_meta()
+        last_proj = meta.get("last_project")
+        if last_proj and Path(last_proj).exists():
+            return Path(last_proj)
+        # Default project
+        default_proj = DEFAULT_ROOT / "default"
+        default_proj.mkdir(parents=True, exist_ok=True)
+        update_project_info(default_proj, "Default Project")
+        return default_proj
+
+    def _get_project_display_name(self):
+        """Get the display name for the current project"""
+        meta = load_projects_meta()
+        proj_str = str(self.project_dir.resolve())
+        projects = meta.get("projects", {})
+        if proj_str in projects:
+            return projects[proj_str].get("display_name", self.project_dir.name)
+        return self.project_dir.name
 
     def _save_last_project(self):
-        try:
-            cfg = DEFAULT_ROOT / "_meta.json"; cfg.parent.mkdir(parents=True, exist_ok=True)
-            cfg.write_text(json.dumps({"last_project": str(self.project_dir)}), encoding="utf-8")
-        except Exception:
-            pass
+        update_project_info(self.project_dir)
 
     def _apply_ui_from_catalog(self):
         last_ui = self.catalog.get("__ui__", {"preview_size": "900", "sharpness": "0.30"})
@@ -1313,9 +1350,17 @@ class Main(QMainWindow):
             save_catalog(self.catalog, self.project_dir)
         return changed
 
-    def _load_project(self, proj_dir: Path):
+    def _load_project(self, proj_dir: Path, display_name: str = None):
         self.project_dir = proj_dir.resolve()
         self.project_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Update metadata
+        if display_name:
+            update_project_info(self.project_dir, display_name)
+        else:
+            update_project_info(self.project_dir)
+        
+        self.project_display_name = self._get_project_display_name()
         self.catalog = load_catalog(self.project_dir)
         self.presets = self.catalog.get("__presets__", {})
         self.active_preset = None
@@ -1323,21 +1368,325 @@ class Main(QMainWindow):
         self.items.clear(); self.current=-1; self.view_filter="All"; self.split_mode=False
         if hasattr(self, "film"): self.film.clear()
         if hasattr(self, "preview"): self.preview.setPixmap(QPixmap())
-        self.lab_project.setText(self.project_dir.name)
+        self.lab_project.setText(self.project_display_name)
+        self.lab_project.setToolTip(str(self.project_dir))
+        self.setWindowTitle(f"Ninlab - {self.project_display_name}")
         self._apply_ui_from_catalog()
         self._seed_default_presets()
         self._refresh_preset_list()
-        self._save_last_project()
+        
+        # Restore images from catalog
+        # Filter keys that look like file paths (not starting with __)
+        image_files = [k for k in self.catalog.keys() if not k.startswith("__") and Path(k).exists()]
+        if image_files:
+            self.to_load = len(image_files)
+            self.loaded = 0
+            self.update_status(f"Restoring {len(image_files)} images...")
+            
+            for p in image_files:
+                # Create item structure
+                item = {"name": p, "full": None, "thumb": None, "settings": DEFAULTS.copy(), "star": False}
+                saved = self.catalog.get(p)
+                if saved:
+                    if isinstance(saved.get("settings"), dict):
+                        item["settings"] = {**DEFAULTS, **saved["settings"]}
+                    item["star"] = bool(saved.get("star", False))
+                    if "preset" in saved:
+                        item["applied_preset"] = saved.get("preset")
+                
+                self.items.append(item)
+                
+                # Start decoder for thumbnail
+                w = DecodeWorker(p, thumb_w=72, thumb_h=48)
+                w.signals.done.connect(self._on_decoded)
+                w.signals.error.connect(lambda m: print(f"Error loading {p}: {m}"))
+                self.pool.start(w)
+
+    def create_menus(self):
+        bar = self.menuBar()
+        
+        # File Menu
+        file_menu = bar.addMenu("File")
+        
+        # New Project
+        action_new = QAction("New Project...", self)
+        action_new.setShortcut("Ctrl+N")
+        action_new.triggered.connect(self.new_project)
+        file_menu.addAction(action_new)
+        
+        # Switch Project
+        action_switch = QAction("Switch Project...", self)
+        action_switch.setShortcut("Ctrl+O")
+        action_switch.triggered.connect(self.switch_project)
+        file_menu.addAction(action_switch)
+        
+        file_menu.addSeparator()
+        
+        # Import Images
+        action_import = QAction("Import Images...", self)
+        action_import.setShortcut("Ctrl+I")
+        action_import.triggered.connect(self.import_images)
+        file_menu.addAction(action_import)
+        
+        file_menu.addSeparator()
+        
+        # Reveal in Explorer
+        action_reveal = QAction("Reveal Project in Explorer", self)
+        action_reveal.triggered.connect(lambda: os.startfile(self.project_dir) if sys.platform=="win32" else None)
+        file_menu.addAction(action_reveal)
+        
+        file_menu.addSeparator()
+        
+        # Exit
+        action_exit = QAction("Exit", self)
+        action_exit.triggered.connect(self.close)
+        file_menu.addAction(action_exit)
+        
+        # Edit Menu
+        edit_menu = bar.addMenu("Edit")
+        
+        action_undo = QAction("Undo", self)
+        action_undo.setShortcut("Ctrl+Z")
+        action_undo.triggered.connect(self.undo_last)
+        edit_menu.addAction(action_undo)
+        
+        action_redo = QAction("Redo", self)
+        action_redo.setShortcut("Ctrl+Shift+Z")
+        action_redo.triggered.connect(self.redo_last)
+        edit_menu.addAction(action_redo)
+        
+        edit_menu.addSeparator()
+        
+        action_copy = QAction("Copy Settings", self)
+        action_copy.setShortcut("Ctrl+C")
+        action_copy.triggered.connect(self.copy_settings)
+        edit_menu.addAction(action_copy)
+        
+        action_paste = QAction("Paste Settings", self)
+        action_paste.setShortcut("Ctrl+V")
+        action_paste.triggered.connect(self.paste_settings)
+        edit_menu.addAction(action_paste)
 
     def new_project(self):
-        d = QFileDialog.getExistingDirectory(self,"Create / Choose Project Folder", str(DEFAULT_ROOT))
-        if not d or not Path(d).is_dir(): return
-        self._load_project(Path(d))
+        # Ask for project name
+        name, ok = QInputDialog.getText(self, "New Project", "Enter project name:")
+        if not ok or not name.strip():
+            return
+        
+        # Create unique folder name
+        from datetime import datetime
+        folder_name = name.strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        proj_path = DEFAULT_ROOT / f"{folder_name}_{timestamp}"
+        
+        self._load_project(proj_path, name.strip())
+        QMessageBox.information(self, "Success", f"Created project '{name.strip()}'")
 
     def switch_project(self):
-        d = QFileDialog.getExistingDirectory(self,"Switch Project", str(DEFAULT_ROOT))
-        if not d or not Path(d).is_dir(): return
-        self._load_project(Path(d))
+        # Show project list dialog
+        meta = load_projects_meta()
+        projects = meta.get("projects", {})
+        
+        if not projects:
+            QMessageBox.information(self, "Info", "No projects found. Create a new project first.")
+            return
+        
+        # Create dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Switch Project")
+        dlg.resize(600, 450)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(12)
+        
+        # Header
+        header = QLabel("Select a project:")
+        header.setStyleSheet("font-size: 13px; font-weight: bold; padding: 4px;")
+        layout.addWidget(header)
+        
+        # Project list
+        list_widget = QListWidget()
+        list_widget.setStyleSheet("""
+            QListWidget {
+                background: #27272a;
+                border: 1px solid #3f3f46;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                margin: 2px;
+                border-radius: 4px;
+                border-bottom: 1px solid #3f3f46;
+            }
+            QListWidget::item:selected {
+                background: #4f46e5;
+                color: white;
+            }
+            QListWidget::item:hover:!selected {
+                background: #3f3f46;
+            }
+        """)
+        
+        def refresh_list():
+            """Refresh the project list"""
+            list_widget.clear()
+            meta = load_projects_meta()
+            projects = meta.get("projects", {})
+            
+            # Sort by last used (most recent first)
+            sorted_projects = sorted(
+                projects.items(),
+                key=lambda x: x[1].get("last_used", ""),
+                reverse=True
+            )
+            
+            for proj_path, proj_info in sorted_projects:
+                if not Path(proj_path).exists():
+                    continue
+                display_name = proj_info.get("display_name", Path(proj_path).name)
+                last_used = proj_info.get("last_used", "Never")
+                if last_used != "Never":
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(last_used)
+                        last_used = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        pass
+                
+                # Use simple text without emoji for better compatibility
+                item_text = f"{display_name}\n  Path: {proj_path}\n  Last used: {last_used}"
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, proj_path)
+                list_widget.addItem(item)
+        
+        refresh_list()
+        layout.addWidget(list_widget)
+        
+        # Context Menu for List
+        list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        def on_context_menu(pos):
+            item = list_widget.itemAt(pos)
+            if not item: return
+            
+            proj_path = item.data(Qt.UserRole)
+            menu = QMenu()
+            
+            act_open = menu.addAction("Open Project")
+            act_open.triggered.connect(lambda: (dlg.accept(), self._load_project(Path(proj_path))))
+            
+            act_reveal = menu.addAction("Reveal in Explorer")
+            act_reveal.triggered.connect(lambda: os.startfile(proj_path) if sys.platform=="win32" else None)
+            
+            menu.addSeparator()
+            
+            act_rename = menu.addAction("Rename")
+            act_rename.triggered.connect(lambda: on_rename_item(item))
+            
+            act_delete = menu.addAction("Delete")
+            act_delete.triggered.connect(lambda: on_delete_item(item))
+            
+            menu.exec(list_widget.mapToGlobal(pos))
+            
+        list_widget.customContextMenuRequested.connect(on_context_menu)
+        
+        # Buttons
+        btn_layout1 = QHBoxLayout()
+        btn_rename = QPushButton("Rename")
+        btn_delete = QPushButton("Delete")
+        btn_browse = QPushButton("Browse...")
+        
+        btn_layout1.addWidget(btn_rename)
+        btn_layout1.addWidget(btn_delete)
+        btn_layout1.addStretch()
+        btn_layout1.addWidget(btn_browse)
+        layout.addLayout(btn_layout1)
+        
+        btn_layout2 = QHBoxLayout()
+        btn_ok = QPushButton("Open")
+        btn_cancel = QPushButton("Cancel")
+        btn_ok.setDefault(True)
+        
+        btn_layout2.addStretch()
+        btn_layout2.addWidget(btn_ok)
+        btn_layout2.addWidget(btn_cancel)
+        layout.addLayout(btn_layout2)
+        
+        # Connect buttons
+        def on_browse():
+            d = QFileDialog.getExistingDirectory(self, "Browse Project Folder", str(DEFAULT_ROOT))
+            if d and Path(d).is_dir():
+                dlg.accept()
+                self._load_project(Path(d))
+        
+        def on_ok():
+            current = list_widget.currentItem()
+            if current:
+                proj_path = current.data(Qt.UserRole)
+                dlg.accept()
+                self._load_project(Path(proj_path))
+            else:
+                QMessageBox.warning(dlg, "Warning", "Please select a project first.")
+        
+        def on_rename_item(item=None):
+            current = item or list_widget.currentItem()
+            if not current:
+                QMessageBox.warning(dlg, "Warning", "Please select a project to rename.")
+                return
+            
+            proj_path = current.data(Qt.UserRole)
+            meta = load_projects_meta()
+            old_name = meta["projects"][proj_path].get("display_name", Path(proj_path).name)
+            
+            new_name, ok = QInputDialog.getText(dlg, "Rename Project", "Enter new project name:", text=old_name)
+            if ok and new_name.strip():
+                from catalog import save_projects_meta
+                meta["projects"][proj_path]["display_name"] = new_name.strip()
+                save_projects_meta(meta)
+                refresh_list()
+                
+                # Update current project display if renaming current project
+                if str(self.project_dir.resolve()) == proj_path:
+                    self.project_display_name = new_name.strip()
+                    self.lab_project.setText(self.project_display_name)
+                    self.setWindowTitle(f"Ninlab - {self.project_display_name}")
+        
+        def on_delete_item(item=None):
+            current = item or list_widget.currentItem()
+            if not current:
+                QMessageBox.warning(dlg, "Warning", "Please select a project to delete.")
+                return
+            
+            proj_path = current.data(Qt.UserRole)
+            meta = load_projects_meta()
+            display_name = meta["projects"][proj_path].get("display_name", Path(proj_path).name)
+            
+            # Prevent deleting current project
+            if str(self.project_dir.resolve()) == proj_path:
+                QMessageBox.warning(dlg, "Warning", "Cannot delete the currently open project.")
+                return
+            
+            reply = QMessageBox.question(
+                dlg, "Confirm Delete",
+                f"Remove project '{display_name}' from the list?\n\nNote: This will only remove it from the list. The project folder and files will not be deleted.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                from catalog import save_projects_meta
+                del meta["projects"][proj_path]
+                save_projects_meta(meta)
+                refresh_list()
+                QMessageBox.information(dlg, "Success", f"Project '{display_name}' removed from list.")
+        
+        btn_browse.clicked.connect(on_browse)
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_rename.clicked.connect(lambda: on_rename_item(None))
+        btn_delete.clicked.connect(lambda: on_delete_item(None))
+        list_widget.itemDoubleClicked.connect(on_ok)
+        
+        dlg.exec()
 
 if __name__=="__main__":
     # macOS HiDPI / Retina: rely on Qt6 auto scaling, just adjust rounding and layer usage
