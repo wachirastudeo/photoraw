@@ -57,6 +57,38 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
+// Simple hash for noise
+#[inline(always)]
+fn simple_hash(n: u32) -> u32 {
+    let mut x = n.wrapping_mul(0x85ebca6b);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xc2b2ae35);
+    x ^= x >> 16;
+    x
+}
+
+#[inline(always)]
+fn noise_2d(x: f32, y: f32, seed: u32) -> f32 {
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    // Simple coordinate hash
+    let h = (ix.wrapping_mul(73856093) ^ iy.wrapping_mul(19349663) ^ (seed as i32).wrapping_mul(83492791)) as u32;
+    let r = simple_hash(h);
+    (r as f32 / 4294967295.0) * 2.0 - 1.0 // -1.0 to 1.0
+}
+
+#[inline(always)]
+fn get_pixel_clamped(input: &[u8], w: usize, h: usize, x: i32, y: i32) -> (f32, f32, f32) {
+    let x = x.max(0).min(w as i32 - 1) as usize;
+    let y = y.max(0).min(h as i32 - 1) as usize;
+    let idx = (y * w + x) * 3;
+    (
+        input[idx] as f32 / 255.0,
+        input[idx + 1] as f32 / 255.0,
+        input[idx + 2] as f32 / 255.0,
+    )
+}
+
 pub struct ImageSettings {
     pub exposure: f32,
     pub contrast: f32,
@@ -77,6 +109,11 @@ pub struct ImageSettings {
     pub vignette: f32,
     pub export_sharpen: f32,
     pub tone_curve: f32,
+    pub defringe: f32,
+    // Film Grain
+    pub grain_amount: f32,
+    pub grain_size: f32,
+    pub grain_roughness: f32,
     // HSL
     pub h_red: f32, pub s_red: f32, pub l_red: f32,
     pub h_orange: f32, pub s_orange: f32, pub l_orange: f32,
@@ -111,6 +148,10 @@ impl ImageSettings {
             vignette: get("vignette"),
             export_sharpen: get("export_sharpen"),
             tone_curve: get("tone_curve"),
+            defringe: get("defringe"),
+            grain_amount: get("grain_amount"),
+            grain_size: get("grain_size"),
+            grain_roughness: get("grain_roughness"),
             h_red: get("h_red"), s_red: get("s_red"), l_red: get("l_red"),
             h_orange: get("h_orange"), s_orange: get("s_orange"), l_orange: get("l_orange"),
             h_yellow: get("h_yellow"), s_yellow: get("s_yellow"), l_yellow: get("l_yellow"),
@@ -123,6 +164,77 @@ impl ImageSettings {
     }
 }
 
+// Denoise preprocessing pass (Bilateral-like filtering)
+fn apply_denoise_pass(input: &[u8], width: usize, height: usize, amount: f32) -> Vec<u8> {
+    if amount <= 1e-6 {
+        return input.to_vec();
+    }
+    
+    let num_pixels = width * height;
+    let mut output = vec![0u8; num_pixels * 3];
+    
+    // 5x5 Gaussian kernel weights (normalized, sum = 1.0)
+    let kernel = [
+        [0.0037, 0.0146, 0.0256, 0.0146, 0.0037],
+        [0.0146, 0.0586, 0.0952, 0.0586, 0.0146],
+        [0.0256, 0.0952, 0.1508, 0.0952, 0.0256],
+        [0.0146, 0.0586, 0.0952, 0.0586, 0.0146],
+        [0.0037, 0.0146, 0.0256, 0.0146, 0.0037],
+    ];
+    
+    output.par_chunks_mut(3).enumerate().for_each(|(i, pixel_out)| {
+        let y = i / width;
+        let x = i % width;
+        
+        // Get center pixel
+        let (r0, g0, b0) = get_pixel_clamped(input, width, height, x as i32, y as i32);
+        let lum0 = rgb_to_lum(r0, g0, b0);
+        
+        // Apply 5x5 blur with edge-aware weighting
+        let mut r_sum = 0.0;
+        let mut g_sum = 0.0;
+        let mut b_sum = 0.0;
+        let mut weight_sum = 0.0;
+        
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (r, g, b) = get_pixel_clamped(input, width, height, x as i32 + dx, y as i32 + dy);
+                let lum = rgb_to_lum(r, g, b);
+                
+                // Gaussian weight
+                let gauss_weight = kernel[(dy + 2) as usize][(dx + 2) as usize];
+                
+                // Edge-aware weight (bilateral component)
+                let lum_diff = (lum - lum0).abs();
+                let edge_weight = (-lum_diff * 10.0).exp();
+                
+                let w = gauss_weight * edge_weight;
+                
+                r_sum += r * w;
+                g_sum += g * w;
+                b_sum += b * w;
+                weight_sum += w;
+            }
+        }
+        
+        // Normalize
+        let r_blur = r_sum / weight_sum;
+        let g_blur = g_sum / weight_sum;
+        let b_blur = b_sum / weight_sum;
+        
+        // Blend original with blurred based on amount
+        let r_final = r0 * (1.0 - amount) + r_blur * amount;
+        let g_final = g0 * (1.0 - amount) + g_blur * amount;
+        let b_final = b0 * (1.0 - amount) + b_blur * amount;
+        
+        pixel_out[0] = (clamp01(r_final) * 255.0 + 0.5) as u8;
+        pixel_out[1] = (clamp01(g_final) * 255.0 + 0.5) as u8;
+        pixel_out[2] = (clamp01(b_final) * 255.0 + 0.5) as u8;
+    });
+    
+    output
+}
+
 pub fn process_pipeline(
     input: &[u8],
     width: usize,
@@ -130,6 +242,15 @@ pub fn process_pipeline(
     settings: &ImageSettings,
     lut: Option<&[u8]>,
 ) -> Vec<u8> {
+    // Apply Denoise as preprocessing if needed
+    let processed_input: Vec<u8>;
+    let input_ref = if settings.denoise > 1e-6 {
+        processed_input = apply_denoise_pass(input, width, height, settings.denoise);
+        &processed_input
+    } else {
+        input
+    };
+    
     let num_pixels = width * height;
     let mut output = vec![0u8; num_pixels * 3];
 
@@ -152,9 +273,9 @@ pub fn process_pipeline(
     // Parallel iteration over pixels
     output.par_chunks_mut(3).enumerate().for_each(|(i, pixel_out)| {
         let idx = i * 3;
-        let r0 = input[idx] as f32 / 255.0;
-        let g0 = input[idx + 1] as f32 / 255.0;
-        let b0 = input[idx + 2] as f32 / 255.0;
+        let r0 = input_ref[idx] as f32 / 255.0;
+        let g0 = input_ref[idx + 1] as f32 / 255.0;
+        let b0 = input_ref[idx + 2] as f32 / 255.0;
 
         // 1. Exposure
         let mut r = clamp01(r0 * exposure_mult);
@@ -199,13 +320,21 @@ pub fn process_pipeline(
             r = clamp01(r - veil);
             g = clamp01(g - veil);
             b = clamp01(b - veil);
-            // Dehaze adds contrast
-            let amount = 0.4 * settings.dehaze;
-            r = 0.5 + (r - 0.5) * (1.0 + amount);
-            g = 0.5 + (g - 0.5) * (1.0 + amount);
-            b = 0.5 + (b - 0.5) * (1.0 + amount);
         }
 
+        // 5. Defringe
+        if settings.defringe > 1e-6 {
+            let min_rb = r.min(b);
+            let purple_mask = (min_rb - g).max(0.0);
+            let purple_mask = clamp01(purple_mask * 3.0);
+            
+            let lum = rgb_to_lum(r, g, b);
+            let mask = purple_mask * settings.defringe;
+            
+            r = r * (1.0 - mask) + lum * mask;
+            g = g * (1.0 - mask) + lum * mask;
+            b = b * (1.0 - mask) + lum * mask;
+        }
         // 5. Saturation & Vibrance
         // Python uses mean(axis=2) as gray base, not luminance
         let gray = (r + g + b) / 3.0;
@@ -304,6 +433,39 @@ pub fn process_pipeline(
             r *= mask;
             g *= mask;
             b *= mask;
+        }
+
+        // 10. Film Grain
+        if settings.grain_amount > 1e-6 {
+            let y_coord = (i / width) as f32;
+            let x_coord = (i % width) as f32;
+            
+            // Size controls noise frequency
+            let noise_scale = 1.0 + settings.grain_size * 4.0;
+            let nx = x_coord / noise_scale;
+            let ny = y_coord / noise_scale;
+            
+            // Generate noise (-1 to 1)
+            let mut noise_val = noise_2d(nx, ny, 12345);
+            
+            // Roughness controls distribution
+            if settings.grain_roughness > 0.5 {
+                let power = 1.0 - (settings.grain_roughness - 0.5) * 0.8;
+                noise_val = noise_val.signum() * noise_val.abs().powf(power);
+            } else {
+                noise_val = noise_val * (0.5 + settings.grain_roughness);
+            }
+            
+            // Luminance-based modulation (grain more visible in midtones)
+            let lum = rgb_to_lum(r, g, b);
+            let grain_mask = 1.0 - (lum - 0.5).abs() * 2.0;
+            let grain_mask = grain_mask.max(0.3).min(1.0);
+            
+            // Apply grain
+            let grain_strength = settings.grain_amount * 0.12 * grain_mask;
+            r += noise_val * grain_strength;
+            g += noise_val * grain_strength;
+            b += noise_val * grain_strength;
         }
 
         // Final Clamp & Write

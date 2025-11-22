@@ -397,12 +397,11 @@ def process_image_fast(base_u8, adj, fast_mode=False):
             result = ninlab_core.process_image(base_u8, rust_settings, lut_list)
             
             # Apply convolution-based effects in Python (not implemented in Rust yet)
-            # Check if any convolution effects are active
+            # Denoise and Film Grain are now in Rust!
+            # Only Clarity and Texture remain in Python
             needs_convolution = (
-                (not fast_mode and abs(adj.get("denoise", 0.0)) > 1e-6) or
                 abs(adj.get("clarity", 0.0)) > 1e-6 or
-                abs(adj.get("texture", 0.0)) > 1e-6 or
-                abs(adj.get("defringe", 0.0)) > 1e-6
+                abs(adj.get("texture", 0.0)) > 1e-6
             )
             
             if needs_convolution:
@@ -410,25 +409,17 @@ def process_image_fast(base_u8, adj, fast_mode=False):
                 result_f = result.astype(np.float32) / 255.0
                 
                 # Apply convolution effects
-                if not fast_mode and abs(adj.get("denoise", 0.0)) > 1e-6:
-                    result_f = apply_denoise(result_f, adj["denoise"])
-                
                 if abs(adj.get("clarity", 0.0)) > 1e-6:
                     result_f = apply_clarity(result_f, adj["clarity"])
                 
                 if abs(adj.get("texture", 0.0)) > 1e-6:
                     result_f = apply_texture(result_f, adj["texture"])
-                    
-                if abs(adj.get("defringe", 0.0)) > 1e-6:
-                    result_f = apply_defringe(result_f, adj["defringe"])
+                
+                # Defringe is now handled in Rust!
+                # Denoise is now handled in Rust!
+                # Film Grain is now handled in Rust!
                 
                 # Convert back to uint8
-                result = (np.clip(result_f, 0, 1) * 255.0 + 0.5).astype(np.uint8)
-            
-            # Apply film grain (always in float space)
-            if abs(adj.get("grain_amount", 0.0)) > 1e-6:
-                result_f = result.astype(np.float32) / 255.0
-                result_f = apply_film_grain(result_f, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5))
                 result = (np.clip(result_f, 0, 1) * 255.0 + 0.5).astype(np.uint8)
             
             return result

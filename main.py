@@ -51,6 +51,7 @@ class Main(QMainWindow):
         self.project_display_name = self._get_project_display_name()
         self.catalog = load_catalog(self.project_dir)
         self.presets = self.catalog.get("__presets__", {})
+        self._init_default_presets()
         
         self.undo_stack={}; self.redo_stack={}
         self.items=[]; self.current=-1; self.view_filter="All"; self.split_mode=False
@@ -173,8 +174,9 @@ class Main(QMainWindow):
         
         # Export
         btnExpSel = QPushButton("Export Selected"); btnExpSel.clicked.connect(self.export_selected)
+        btnExpStar = QPushButton("Export Starred ★"); btnExpStar.clicked.connect(self.export_starred)
         btnExpAll = QPushButton("Export All"); btnExpAll.clicked.connect(self.export_all)
-        row2.addWidget(btnExpSel); row2.addWidget(btnExpAll)
+        row2.addWidget(btnExpSel); row2.addWidget(btnExpStar); row2.addWidget(btnExpAll)
         
         root.addLayout(row2)
 
@@ -915,6 +917,214 @@ class Main(QMainWindow):
         self._kick_preview_thread(force=True)
 
     # ------- Presets -------
+    def _init_default_presets(self):
+        """Initialize default presets if they don't exist"""
+        changed = False
+        
+        # Remove deprecated presets
+        deprecated = ["Matrix", "Fuji"]
+        for name in deprecated:
+            if name in self.presets:
+                del self.presets[name]
+                changed = True
+        
+        # Portrait Preset - Soft skin, warm tones
+        if "Portrait" not in self.presets:
+            self.presets["Portrait"] = {
+                "exposure": 0.1,
+                "contrast": -0.05,
+                "highlights": 0.15,
+                "shadows": 0.25,
+                "whites": 0.0,
+                "blacks": 0.1,
+                "saturation": -0.1,
+                "vibrance": 0.15,
+                "temperature": 0.15,  # Warm
+                "tint": 0.05,
+                "gamma": 1.0,
+                "clarity": -0.25,  # Soft skin
+                "texture": -0.15,
+                "mid_contrast": 0.0,
+                "dehaze": 0.0,
+                "denoise": 0.3,  # Smooth skin
+                "vignette": 0.15,
+                "defringe": 0.0,
+                "export_sharpen": 0.15,
+                "tone_curve": 0.0,
+                "grain_amount": 0.0,
+                "grain_size": 0.5,
+                "grain_roughness": 0.5,
+            }
+            changed = True
+        
+        # Film Preset - Classic film look (always update to latest version)
+        self.presets["Film"] = {
+                "exposure": 0.05,
+                "contrast": 0.25,
+                "highlights": -0.1,
+                "shadows": 0.1,
+                "whites": -0.05,
+                "blacks": 0.15,  # Lifted blacks
+                "saturation": -0.2,  # Desaturated
+                "vibrance": 0.0,
+                "temperature": 0.05,
+                "tint": 0.1,  # Slight magenta shift
+                "gamma": 1.0,
+                "clarity": 0.15,
+                "texture": 0.1,
+                "mid_contrast": 0.2,
+                "dehaze": 0.0,
+                "denoise": 0.0,
+                "vignette": 0.25,
+                "defringe": 0.0,
+                "export_sharpen": 0.2,
+                "tone_curve": 0.0,
+                "grain_amount": 0.0,  # No grain by default
+                "grain_size": 0.15,  # Fine grain if enabled
+                "grain_roughness": 0.5,
+            }
+        
+        # Kodachrome - Vibrant, warm, high contrast
+        self.presets["Kodachrome"] = {
+            "exposure": 0.1,
+            "contrast": 0.35,
+            "highlights": -0.15,
+            "shadows": 0.05,
+            "whites": 0.1,
+            "blacks": -0.1,
+            "saturation": 0.3,  # Vibrant colors
+            "vibrance": 0.2,
+            "temperature": 0.2,  # Warm
+            "tint": -0.05,
+            "gamma": 1.0,
+            "clarity": 0.2,
+            "texture": 0.15,
+            "mid_contrast": 0.15,
+            "dehaze": 0.0,
+            "denoise": 0.0,
+            "vignette": 0.2,
+            "defringe": 0.0,
+            "export_sharpen": 0.25,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.2,
+            "grain_roughness": 0.6,
+        }
+        
+        # Portra - Soft, pastel, skin-friendly
+        self.presets["Portra"] = {
+            "exposure": 0.15,
+            "contrast": -0.1,
+            "highlights": 0.2,
+            "shadows": 0.3,
+            "whites": 0.05,
+            "blacks": 0.2,  # Lifted blacks
+            "saturation": -0.15,  # Pastel
+            "vibrance": 0.1,
+            "temperature": 0.1,  # Slightly warm
+            "tint": 0.05,
+            "gamma": 1.0,
+            "clarity": -0.15,  # Soft
+            "texture": -0.1,
+            "mid_contrast": -0.05,
+            "dehaze": 0.0,
+            "denoise": 0.2,
+            "vignette": 0.1,
+            "defringe": 0.0,
+            "export_sharpen": 0.15,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.25,
+            "grain_roughness": 0.4,
+        }
+        
+        # Cinematic - Cool tones, moody, teal & orange
+        self.presets["Cinematic"] = {
+            "exposure": -0.05,
+            "contrast": 0.3,
+            "highlights": -0.2,
+            "shadows": 0.15,
+            "whites": -0.1,
+            "blacks": 0.25,  # Lifted blacks for mood
+            "saturation": -0.1,
+            "vibrance": 0.15,
+            "temperature": -0.15,  # Cool/teal
+            "tint": 0.0,
+            "gamma": 1.0,
+            "clarity": 0.1,
+            "texture": 0.05,
+            "mid_contrast": 0.25,
+            "dehaze": 0.1,
+            "denoise": 0.0,
+            "vignette": 0.35,  # Strong vignette
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.18,
+            "grain_roughness": 0.65,
+        }
+        
+        # Faded Forest - Muted green, moody, cinematic
+        self.presets["Faded Forest"] = {
+            "exposure": -0.15,  # Darker
+            "contrast": 0.35,  # High contrast
+            "highlights": -0.2,
+            "shadows": 0.25,  # Lifted shadows
+            "whites": -0.1,
+            "blacks": 0.3,  # Lifted blacks (moody)
+            "saturation": -0.35,  # Muted/desaturated
+            "vibrance": -0.05,
+            "temperature": -0.2,  # Cool
+            "tint": -0.1,  # Slight green
+            "gamma": 1.0,
+            "clarity": 0.2,
+            "texture": 0.15,
+            "mid_contrast": 0.2,
+            "dehaze": 0.15,
+            "denoise": 0.0,
+            "vignette": 0.3,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.15,
+            "grain_roughness": 0.6,
+        }
+        
+        # Faded B&W - Black & white with lifted blacks
+        self.presets["Faded B&W"] = {
+            "exposure": 0.05,
+            "contrast": 0.15,
+            "highlights": 0.0,
+            "shadows": 0.15,
+            "whites": 0.0,
+            "blacks": 0.35,  # Lifted blacks (not pure black)
+            "saturation": -1.0,  # Black & white
+            "vibrance": 0.0,
+            "temperature": 0.0,
+            "tint": 0.0,
+            "gamma": 1.0,
+            "clarity": 0.1,
+            "texture": 0.05,
+            "mid_contrast": 0.1,
+            "dehaze": 0.0,
+            "denoise": 0.0,
+            "vignette": 0.15,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.2,
+            "grain_roughness": 0.5,
+        }
+        
+        changed = True
+        
+        if changed:
+            self.catalog["__presets__"] = self.presets
+            save_catalog(self.catalog, self.project_dir)
+    
     def save_preset_dialog(self):
         if self.current < 0:
             QMessageBox.information(self,"Info","Select an image to save its settings as a preset"); return
@@ -1459,6 +1669,13 @@ class Main(QMainWindow):
     def export_filtered(self):
         ready=[it for it in self.items if it["full"] is not None and self._pass_filter(it)]
         self._start_export(ready)
+    
+    def export_starred(self):
+        starred=[it for it in self.items if it["full"] is not None and it.get("star", False)]
+        if not starred:
+            QMessageBox.information(self,"Info","No starred images to export")
+            return
+        self._start_export(starred)
 
     def closeEvent(self, event):
         try:
@@ -1690,6 +1907,27 @@ class Main(QMainWindow):
         action_paste.setShortcut(QKeySequence.Paste)
         action_paste.triggered.connect(self.paste_settings)
         edit_menu.addAction(action_paste)
+        
+        # Export Menu
+        export_menu = bar.addMenu("Export")
+        
+        action_export_selected = QAction("Export Selected", self)
+        action_export_selected.triggered.connect(self.export_selected)
+        export_menu.addAction(action_export_selected)
+        
+        action_export_starred = QAction("Export Starred ★", self)
+        action_export_starred.triggered.connect(self.export_starred)
+        export_menu.addAction(action_export_starred)
+        
+        export_menu.addSeparator()
+        
+        action_export_all = QAction("Export All", self)
+        action_export_all.triggered.connect(self.export_all)
+        export_menu.addAction(action_export_all)
+        
+        action_export_filtered = QAction("Export Filtered", self)
+        action_export_filtered.triggered.connect(self.export_filtered)
+        export_menu.addAction(action_export_filtered)
 
 
     def new_project(self):
