@@ -21,7 +21,8 @@ DEFAULTS = {
     "exposure":0.0,"contrast":0.0,"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0,
     "saturation":0.0,"vibrance":0.0,"temperature":0.0,"tint":0.0,"gamma":1.0,
     "clarity":0.0,"texture":0.0,"mid_contrast":0.0,"dehaze":0.0,"denoise":0.0,
-    "vignette":0.0,"export_sharpen":0.2,"tone_curve":0.0,"curve_lut":None,
+    "vignette":0.0,"defringe":0.0,"export_sharpen":0.2,"tone_curve":0.0,"curve_lut":None,
+    "grain_amount":0.0,"grain_size":0.5,"grain_roughness":0.5,
     **{f"h_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"s_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"l_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
@@ -47,7 +48,10 @@ def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
     if abs(sh)>1e-6:
         w=np.clip(1.0-(y*2.0),0,1); out=out*(1-w[...,None])+(out*(1+0.8*sh))*w[...,None]
     if abs(hi)>1e-6:
-        w=np.clip((y*2.0-1.0),0,1); out=out*(1-w[...,None])+(out*(1-0.8*hi))*w[...,None]
+        # Smoothstep for smoother highlight transition
+        t = np.clip((y*2.0-1.0),0,1)
+        w = t * t * (3.0 - 2.0 * t)
+        out=out*(1-w[...,None])+(out*(1-0.8*hi))*w[...,None]
     if abs(wh)>1e-6: out=np.minimum(out*(1.0+wh*0.6),1.0)
     if abs(bl)>1e-6: out=np.maximum(out+bl*0.4,0.0)
     return out
@@ -75,17 +79,90 @@ def apply_dehaze(rgb, amount=0.0):
     return apply_contrast_gamma(base, contrast=0.4*amount, gamma=1.0)
 
 def apply_denoise(rgb, amount=0.0):
-    """ลด noise แบบ edge-aware ง่าย ๆ"""
-    if amount<=1e-6: return rgb
-    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
-    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
-    y = clamp01(rgb_to_lum(rgb))
-    gy, gx = np.gradient(y)
-    grad = np.abs(gy) + np.abs(gx)
-    w=np.exp(-grad*6.0)  # ขึ้นกับความชันของความสว่าง
-    mix = w[...,None]
-    out = rgb*mix + blur*(1.0-mix)
-    return clamp01(rgb*(1.0-amount) + out*amount)
+    """Bilateral filtering for noise reduction with edge preservation"""
+    if amount <= 1e-6:
+        return rgb
+    
+    # Multi-pass bilateral-like filtering
+    # Stronger spatial blur with edge-aware weighting
+    result = rgb.copy()
+    
+    for _ in range(int(1 + amount * 2)):  # More passes for stronger denoise
+        # Larger kernel for better noise reduction
+        pad = np.pad(result, ((2,2),(2,2),(0,0)), mode='edge')
+        
+        # 5x5 Gaussian kernel (Sigma ~ 1.0), Normalized sum ≈ 1.0
+        # Row 0
+        r0 = pad[:-4,:-4] * 0.0037 + pad[:-4,1:-3] * 0.0146 + pad[:-4,2:-2] * 0.0256 + pad[:-4,3:-1] * 0.0146 + pad[:-4,4:] * 0.0037
+        # Row 1
+        r1 = pad[1:-3,:-4] * 0.0146 + pad[1:-3,1:-3] * 0.0586 + pad[1:-3,2:-2] * 0.0952 + pad[1:-3,3:-1] * 0.0586 + pad[1:-3,4:] * 0.0146
+        # Row 2
+        r2 = pad[2:-2,:-4] * 0.0256 + pad[2:-2,1:-3] * 0.0952 + pad[2:-2,2:-2] * 0.1508 + pad[2:-2,3:-1] * 0.0952 + pad[2:-2,4:] * 0.0256
+        # Row 3
+        r3 = pad[3:-1,:-4] * 0.0146 + pad[3:-1,1:-3] * 0.0586 + pad[3:-1,2:-2] * 0.0952 + pad[3:-1,3:-1] * 0.0586 + pad[3:-1,4:] * 0.0146
+        # Row 4
+        r4 = pad[4:,:-4] * 0.0037 + pad[4:,1:-3] * 0.0146 + pad[4:,2:-2] * 0.0256 + pad[4:,3:-1] * 0.0146 + pad[4:,4:] * 0.0037
+        
+        blur = r0 + r1 + r2 + r3 + r4
+        
+        # Edge-aware weighting based on luminance gradient
+        y = clamp01(rgb_to_lum(result))
+        gy, gx = np.gradient(y)
+        grad = np.sqrt(gy*gy + gx*gx)
+        
+        # Stronger edge preservation
+        edge_weight = np.exp(-grad * 10.0)
+        edge_weight = edge_weight[..., None]
+        
+        # Color similarity (bilateral component)
+        color_diff = np.sum(np.abs(result - blur), axis=2, keepdims=True)
+        color_weight = np.exp(-color_diff * 5.0)
+        
+        # Combined weight
+        weight = edge_weight * color_weight
+        
+        # Blend based on weights
+        result = result * (1 - weight) + blur * weight
+    
+    # Final blend with original based on amount
+    return clamp01(rgb * (1.0 - amount) + result * amount)
+
+
+def apply_defringe(rgb, amount=0.0):
+    """
+    Remove purple fringing (chromatic aberration).
+    Target pixels where Red and Blue are high, but Green is low (Purple/Magenta).
+    """
+    if amount <= 1e-6:
+        return rgb
+    
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+    
+    # Detect purple: (R+B)/2 > G
+    # We want a smooth mask.
+    # Purple score = min(R, B) - G. If R,B are high and G is low, score is high.
+    
+    # Vectorized approach
+    min_rb = np.minimum(r, b)
+    purple_mask = np.maximum(0, min_rb - g)
+    
+    # Amplify the mask
+    purple_mask = clamp01(purple_mask * 3.0)
+    
+    # Desaturate the purple areas towards Green (or Gray)
+    lum = rgb_to_lum(rgb)
+    
+    # Blend original with desaturated version based on mask * amount
+    mask = purple_mask * amount
+    mask = mask[..., None]
+    
+    # Target color: Luminance (Gray)
+    gray_rgb = np.stack([lum, lum, lum], axis=-1)
+    
+    return rgb * (1.0 - mask) + gray_rgb * mask
+
 
 def apply_tone_curve(rgb, curve_amount=0.0):
     """
@@ -150,6 +227,56 @@ def apply_vignette(rgb, amount=0.0):
     r2 = dx*dx + dy*dy
     mask = np.clip(1.0 - amount*r2, 0.2, 1.0)
     return clamp01(rgb*mask[...,None])
+
+def apply_film_grain(rgb, amount=0.0, size=0.5, roughness=0.5):
+    """
+    Add film grain effect similar to Lightroom
+    amount: grain intensity (0-1)
+    size: grain size (0=fine, 1=coarse)
+    roughness: grain texture (0=smooth, 1=rough)
+    """
+    if amount <= 1e-6:
+        return rgb
+    
+    h, w, _ = rgb.shape
+    
+    # Generate noise pattern
+    # Size controls the frequency of noise
+    noise_scale = max(1, int(1 + size * 4))  # 1-5 pixels
+    
+    # Generate base noise at lower resolution
+    noise_h = max(1, h // noise_scale)
+    noise_w = max(1, w // noise_scale)
+    noise = np.random.normal(0, 1, (noise_h, noise_w))
+    
+    # Resize to image size (creates grain size effect)
+    from PIL import Image
+    noise_img = Image.fromarray((noise * 127 + 128).astype(np.uint8))
+    noise_resized = np.array(noise_img.resize((w, h), Image.BILINEAR))
+    noise = (noise_resized.astype(np.float32) - 128) / 127.0
+    
+    # Roughness controls the distribution
+    if roughness > 0.5:
+        # More rough = more extreme values
+        power = 1.0 - (roughness - 0.5) * 0.8
+        noise = np.sign(noise) * np.power(np.abs(noise), power)
+    else:
+        # More smooth = more gaussian
+        noise = noise * (0.5 + roughness)
+    
+    # Apply grain with luminance-based modulation
+    # Grain is more visible in midtones
+    lum = rgb_to_lum(rgb)
+    grain_mask = 1.0 - np.abs(lum - 0.5) * 2.0  # Peak at 0.5 luminance
+    grain_mask = np.clip(grain_mask, 0.3, 1.0)  # Don't completely remove from highlights/shadows
+    grain_mask = grain_mask[..., None]
+    
+    # Add grain
+    grain_strength = amount * 0.12 * grain_mask
+    out = rgb + noise[..., None] * grain_strength
+    
+    return np.clip(out, 0, 1)
+
 
 def apply_unsharp(rgb, amount=0.0):
     if amount<=1e-6: return rgb
@@ -240,22 +367,19 @@ def pipeline(rgb01, adj, fast_mode=False):
     x=clamp01(apply_texture(x, adj["texture"]))
     x=clamp01(apply_hsl_mixer(x,adj))
     x=clamp01(apply_vignette(x, adj["vignette"]))
+    x=clamp01(apply_defringe(x, adj.get("defringe", 0.0)))
+    x=clamp01(apply_film_grain(x, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5)))
     return x
 
 def process_image_fast(base_u8, adj, fast_mode=False):
     """
     Wrapper to use Rust extension if available.
+    Uses hybrid approach: Rust for pixel-wise ops, Python for convolutions.
     base_u8: uint8 numpy array (H, W, 3)
     adj: dict of settings
     """
     if ninlab_core:
-        # Rust implementation
-        # Note: Rust pipeline currently implements pixel-wise ops.
-        # Convolutions (Denoise, Clarity, Texture) are not yet in Rust.
-        # But for 'fast_mode' (live preview), we usually skip Denoise anyway.
-        # For full export, we might miss Clarity/Texture if we rely solely on Rust.
-        # Ideally, we should implement them in Rust or do a hybrid approach.
-        # For now, let's use Rust for the heavy lifting.
+        # Hybrid approach: Rust for pixel-wise, Python for convolutions
         try:
             # Rust expects HashMap<String, f32>. Filter out non-float values (like curve_lut which is list/None).
             rust_settings = {k: float(v) for k, v in adj.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
@@ -269,10 +393,48 @@ def process_image_fast(base_u8, adj, fast_mode=False):
                 elif isinstance(lut, np.ndarray):
                     lut_list = lut.astype(np.uint8).tolist()
             
-            return ninlab_core.process_image(base_u8, rust_settings, lut_list)
+            # Process with Rust (pixel-wise operations)
+            result = ninlab_core.process_image(base_u8, rust_settings, lut_list)
+            
+            # Apply convolution-based effects in Python (not implemented in Rust yet)
+            # Check if any convolution effects are active
+            needs_convolution = (
+                (not fast_mode and abs(adj.get("denoise", 0.0)) > 1e-6) or
+                abs(adj.get("clarity", 0.0)) > 1e-6 or
+                abs(adj.get("texture", 0.0)) > 1e-6 or
+                abs(adj.get("defringe", 0.0)) > 1e-6
+            )
+            
+            if needs_convolution:
+                # Convert to float for convolution operations
+                result_f = result.astype(np.float32) / 255.0
+                
+                # Apply convolution effects
+                if not fast_mode and abs(adj.get("denoise", 0.0)) > 1e-6:
+                    result_f = apply_denoise(result_f, adj["denoise"])
+                
+                if abs(adj.get("clarity", 0.0)) > 1e-6:
+                    result_f = apply_clarity(result_f, adj["clarity"])
+                
+                if abs(adj.get("texture", 0.0)) > 1e-6:
+                    result_f = apply_texture(result_f, adj["texture"])
+                    
+                if abs(adj.get("defringe", 0.0)) > 1e-6:
+                    result_f = apply_defringe(result_f, adj["defringe"])
+                
+                # Convert back to uint8
+                result = (np.clip(result_f, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+            
+            # Apply film grain (always in float space)
+            if abs(adj.get("grain_amount", 0.0)) > 1e-6:
+                result_f = result.astype(np.float32) / 255.0
+                result_f = apply_film_grain(result_f, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5))
+                result = (np.clip(result_f, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+            
+            return result
         except Exception as e:
             print(f"Rust execution failed: {e}")
-            # Fallback
+            # Fallback to pure Python
             pass
             
     # Fallback to NumPy
@@ -331,7 +493,8 @@ def decode_image(path, thumb_size=(72,48)):
         full=np.array(img,dtype=np.uint8)
     elif rawpy is not None:
         with rawpy.imread(path) as raw:
-            full=raw.postprocess(use_camera_wb=True,no_auto_bright=True,output_bps=8)
+            # Enable auto brightness to match camera JPEG look
+            full=raw.postprocess(use_camera_wb=True,no_auto_bright=False,output_bps=8)
     else:
         raise RuntimeError("RAW file needs rawpy. Install: pip install rawpy")
 
@@ -339,3 +502,139 @@ def decode_image(path, thumb_size=(72,48)):
     thumb.thumbnail(thumb_size, Image.BILINEAR)
     thumb=np.array(thumb,dtype=np.uint8)
     return full, thumb
+
+def get_image_metadata(path):
+    """
+    Extract metadata from image file.
+    Returns a dict with keys: Name, Size, Dimensions, Camera, ISO, Aperture, Shutter, Lens, Date
+    """
+    meta = {
+        "Name": os.path.basename(path),
+        "Size": f"{os.path.getsize(path) / (1024*1024):.2f} MB",
+        "Dimensions": "-",
+        "Camera": "-",
+        "ISO": "-",
+        "Aperture": "-",
+        "Shutter": "-",
+        "Lens": "-",
+        "Date": "-"
+    }
+    
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        
+        # Use exiftool for RAW files (best support for all RAW formats including CR3)
+        if ext in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.orf', '.raf', '.rw2'):
+            try:
+                import subprocess
+                import json
+                
+                # Try to use exiftool (if installed)
+                result = subprocess.run(
+                    ['exiftool', '-j', '-Model', '-ISO', '-FNumber', '-ExposureTime', 
+                     '-LensModel', '-DateTimeOriginal', '-ImageWidth', '-ImageHeight', path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    data = json.loads(result.stdout)[0]
+                    
+                    if 'Model' in data:
+                        meta["Camera"] = str(data['Model']).strip()
+                    
+                    if 'ISO' in data:
+                        meta["ISO"] = str(data['ISO'])
+                    
+                    if 'FNumber' in data or 'Aperture' in data:
+                        fnum = data.get('FNumber', data.get('Aperture', ''))
+                        if fnum:
+                            try:
+                                meta["Aperture"] = f"f/{float(fnum):.1f}"
+                            except:
+                                meta["Aperture"] = str(fnum)
+                    
+                    if 'ExposureTime' in data or 'ShutterSpeed' in data:
+                        exp = data.get('ExposureTime', data.get('ShutterSpeed', ''))
+                        if exp:
+                            try:
+                                if isinstance(exp, str) and '/' in exp:
+                                    parts = exp.split('/')
+                                    if int(parts[0]) == 1:
+                                        meta["Shutter"] = f"1/{parts[1]}s"
+                                    else:
+                                        meta["Shutter"] = f"{int(parts[0])/int(parts[1]):.2f}s"
+                                else:
+                                    val = float(exp)
+                                    if val < 1:
+                                        meta["Shutter"] = f"1/{int(1/val)}s"
+                                    else:
+                                        meta["Shutter"] = f"{val:.2f}s"
+                            except:
+                                meta["Shutter"] = str(exp)
+                    
+                    if 'LensModel' in data:
+                        meta["Lens"] = str(data['LensModel']).strip()
+                    
+                    if 'DateTimeOriginal' in data:
+                        meta["Date"] = str(data['DateTimeOriginal'])
+                    elif 'CreateDate' in data:
+                        meta["Date"] = str(data['CreateDate'])
+                    
+                    if 'ImageWidth' in data and 'ImageHeight' in data:
+                        meta["Dimensions"] = f"{data['ImageWidth']} x {data['ImageHeight']}"
+                        
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+                print(f"exiftool error: {e}, falling back to rawpy")
+            
+            # Get dimensions from rawpy
+            if rawpy is not None:
+                try:
+                    with rawpy.imread(path) as raw:
+                        meta["Dimensions"] = f"{raw.sizes.width} x {raw.sizes.height}"
+                except:
+                    pass
+        
+        else:
+            # For JPEG/PNG/TIFF, use PIL
+            try:
+                img = Image.open(path)
+                meta["Dimensions"] = f"{img.width} x {img.height}"
+                
+                # Extract EXIF
+                exif = img._getexif()
+                if exif:
+                    from PIL.ExifTags import TAGS
+                    for tag_id, value in exif.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if tag == "Model": 
+                            meta["Camera"] = str(value).strip()
+                        elif tag == "ISOSpeedRatings": 
+                            meta["ISO"] = str(value)
+                        elif tag == "FNumber": 
+                            if isinstance(value, tuple):
+                                meta["Aperture"] = f"f/{value[0]/value[1]:.1f}"
+                            else:
+                                meta["Aperture"] = f"f/{float(value):.1f}"
+                        elif tag == "ExposureTime": 
+                            if isinstance(value, tuple):
+                                if value[0] == 1:
+                                    meta["Shutter"] = f"1/{value[1]}s"
+                                else:
+                                    meta["Shutter"] = f"{value[0]/value[1]:.2f}s"
+                            else:
+                                meta["Shutter"] = f"{value}s"
+                        elif tag == "LensModel": 
+                            meta["Lens"] = str(value).strip()
+                        elif tag == "DateTimeOriginal": 
+                            meta["Date"] = str(value)
+            except Exception as e:
+                print(f"PIL error: {e}")
+                
+    except Exception as e:
+        print(f"Metadata error: {e}")
+        
+    return meta
+
+

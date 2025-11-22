@@ -77,3 +77,14 @@ def update_project_info(project_path: Path, display_name: str = None):
     
     save_projects_meta(meta)
     return meta
+
+def load_global_presets():
+    """Load global presets from _meta.json"""
+    meta = load_projects_meta()
+    return meta.get("presets", {})
+
+def save_global_presets(presets: dict):
+    """Save global presets to _meta.json"""
+    meta = load_projects_meta()
+    meta["presets"] = presets
+    save_projects_meta(meta)

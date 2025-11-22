@@ -63,22 +63,30 @@ class PreviewWorker(QRunnable):
         if PreviewWorker.is_stale(self.req_id): return
 
         if self.is_zoomed and self.mode == "single":
-            # Check if we have a cached processed full image
-            settings_hash = str(sorted(self.adj.items()))
-            zoom_cache_key = ("zoom_processed", settings_hash, self.sharpen_amt)
+            # OPTIMIZATION: Crop-then-Process approach
+            # Instead of processing the full image (slow with effects), we:
+            # 1. Apply geometric transforms (Rotate/Flip/Crop) to the raw image
+            # 2. Crop the visible area
+            # 3. Process only the cropped patch
             
-            if zoom_cache_key in self.processed_cache:
-                # Use cached processed image
-                processed_full = self.processed_cache[zoom_cache_key]
+            # 1. Get Geometrically Transformed Raw (Cached)
+            # We only care about geometric settings for this cache
+            geo_keys = ["rotate", "flip_h", "crop"]
+            geo_settings = {k: self.adj.get(k) for k in geo_keys}
+            geo_hash = str(sorted(geo_settings.items()))
+            zoom_geo_cache_key = ("zoom_geo_raw", geo_hash)
+            
+            if zoom_geo_cache_key in self.processed_cache:
+                transformed_raw = self.processed_cache[zoom_geo_cache_key]
             else:
-                # Process the full image and cache it
-                processed_full = process_image_fast(self.full_rgb, self.adj, fast_mode=False)
-                processed_full = apply_transforms(processed_full, self.adj)
-                processed_full = preview_sharpen(processed_full, self.sharpen_amt)
-                self.processed_cache[zoom_cache_key] = processed_full
+                # Apply transforms to raw image (disable export sharpen for this step)
+                geo_adj = self.adj.copy()
+                geo_adj["export_sharpen"] = 0.0
+                transformed_raw = apply_transforms(self.full_rgb, geo_adj)
+                self.processed_cache[zoom_geo_cache_key] = transformed_raw
             
-            # Now crop from the processed image
-            h_full, w_full, _ = processed_full.shape
+            # 2. Calculate Crop Coordinates
+            h_full, w_full, _ = transformed_raw.shape
             preview_w, preview_h = self.preview_size.width(), self.preview_size.height()
 
             crop_w, crop_h = preview_w, preview_h
@@ -92,8 +100,19 @@ class PreviewWorker(QRunnable):
             x0 = max(0, min(w_full - crop_w, x0))
             y0 = max(0, min(h_full - crop_h, y0))
             
-            # Crop from processed image
-            out = processed_full[y0:y0+crop_h, x0:x0+crop_w].copy()
+            # Crop the raw patch
+            raw_patch = transformed_raw[y0:y0+crop_h, x0:x0+crop_w].copy()
+            
+            # 3. Process the Patch
+            # Disable vignette for patch processing to avoid mini-vignette
+            patch_adj = self.adj.copy()
+            patch_adj["vignette"] = 0.0
+            
+            # Process color/effects on the small patch (Fast!)
+            out = process_image_fast(raw_patch, patch_adj, fast_mode=False)
+            
+            # Apply preview sharpening
+            out = preview_sharpen(out, self.sharpen_amt)
             
             if PreviewWorker.is_stale(self.req_id): return
             self.signals.ready.emit(out)

@@ -175,7 +175,8 @@ pub fn process_pipeline(
             b = b * (1.0 - w) + (b * (1.0 + 0.8 * settings.shadows)) * w;
         }
         if settings.highlights.abs() > 1e-6 {
-            let w = clamp01(lum * 2.0 - 1.0);
+            let t = clamp01(lum * 2.0 - 1.0);
+            let w = t * t * (3.0 - 2.0 * t); // Smoothstep
             r = r * (1.0 - w) + (r * (1.0 - 0.8 * settings.highlights)) * w;
             g = g * (1.0 - w) + (g * (1.0 - 0.8 * settings.highlights)) * w;
             b = b * (1.0 - w) + (b * (1.0 - 0.8 * settings.highlights)) * w;

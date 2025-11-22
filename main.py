@@ -8,7 +8,7 @@ from PySide6.QtWidgets import ( # NOQA
     QFrame, QTabWidget, QSlider, QToolButton, QDialog, QListWidget, QCheckBox, QSizePolicy, QScrollArea,
     QMainWindow, QToolBar, QMenuBar, QMenu, QListWidgetItem, QInputDialog, QDialogButtonBox
 ) # NOQA
-from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction, QIcon
+from PySide6.QtGui import QPixmap, QGuiApplication, QPalette, QColor, QPainter, QPainterPath, QAction, QIcon, QKeySequence, QShortcut
 
 from catalog import load_catalog, save_catalog, DEFAULT_ROOT, load_projects_meta, update_project_info
 from imaging import DEFAULTS
@@ -93,8 +93,20 @@ class Main(QMainWindow):
         btnNew = QPushButton("New"); btnNew.setToolTip("New Project"); btnNew.clicked.connect(self.new_project)
         btnSwitch = QPushButton("Switch"); btnSwitch.setToolTip("Switch Project"); btnSwitch.clicked.connect(self.switch_project)
         btnImport = QPushButton("Import Images"); btnImport.clicked.connect(self.import_images)
-        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnImport.setFixedWidth(120)
-        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnImport)
+        btnDelete = QPushButton("Delete"); btnDelete.clicked.connect(self.delete_selected)
+        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnImport.setFixedWidth(120); btnDelete.setFixedWidth(80)
+        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnImport); row1.addWidget(btnDelete)
+        
+        # Shortcuts
+        from PySide6.QtGui import QKeySequence
+        QShortcut(QKeySequence.Delete, self, self.delete_selected)
+        QShortcut(QKeySequence(Qt.Key_Backspace), self, self.delete_selected)
+        QShortcut(QKeySequence.Undo, self, self.undo_last)
+        QShortcut(QKeySequence.Redo, self, self.redo_last)
+        QShortcut(QKeySequence.Copy, self, self.copy_settings)
+        QShortcut(QKeySequence.Paste, self, self.paste_settings)
+        QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.select_next_item(-1))
+        QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.select_next_item(1))
         
         # View Actions
         row1.addStretch(1) # Spacer
@@ -197,11 +209,12 @@ class Main(QMainWindow):
         self.tabs.addTab(self.group_effects(), "Effects")
         self.tabs.addTab(self.group_hsl(), "HSL")
         self.tabs.addTab(self.group_presets_tab(), "Presets")
+        self.tabs.addTab(self.group_info(), "Info")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         right_panel.addWidget(self.tabs)
 
         right_wrap = QWidget(); right_wrap.setLayout(right_panel)
-        right_wrap.setFixedWidth(410)  # keep tool panel wide enough for labels/buttons
+        right_wrap.setFixedWidth(500)  # wider tool panel for better visibility
         content.addWidget(right_wrap, 0)
         root.addLayout(content, 1)
 
@@ -288,6 +301,38 @@ class Main(QMainWindow):
         self.showMaximized()
 
     # ------- groups -------
+    def group_info(self):
+        g = QGroupBox("Image Info")
+        f = QFormLayout(g)
+        
+        self.lbl_name = QLabel("-")
+        self.lbl_size = QLabel("-")
+        self.lbl_dim = QLabel("-")
+        self.lbl_camera = QLabel("-")
+        self.lbl_iso = QLabel("-")
+        self.lbl_aperture = QLabel("-")
+        self.lbl_shutter = QLabel("-")
+        self.lbl_lens = QLabel("-")
+        self.lbl_date = QLabel("-")
+        
+        f.addRow("Name:", self.lbl_name)
+        f.addRow("Size:", self.lbl_size)
+        f.addRow("Dimensions:", self.lbl_dim)
+        f.addRow("Camera:", self.lbl_camera)
+        f.addRow("Lens:", self.lbl_lens)
+        f.addRow("ISO:", self.lbl_iso)
+        f.addRow("Aperture:", self.lbl_aperture)
+        f.addRow("Shutter:", self.lbl_shutter)
+        f.addRow("Date:", self.lbl_date)
+        
+        scroll = QScrollArea()
+        scroll.setWidget(g)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        
+        return scroll
+
     def group_basic(self):
         g=QGroupBox("Basic"); f=QFormLayout(g)
         from imaging import DEFAULTS
@@ -403,13 +448,40 @@ class Main(QMainWindow):
 
     def group_effects(self):
         from curve_widget import CurveWidget
-        g=QGroupBox("Effects"); f=QFormLayout(g)
+        g = QGroupBox("Effects")
+        # Use QVBoxLayout for the main container to stack Curve and Sliders vertically
+        main_layout = QVBoxLayout(g)
         
-        # Curve Widget
-        curve_label = QLabel("Tone Curve:")
+        # 1. Tone Curve Section
+        curve_container = QWidget()
+        curve_layout = QVBoxLayout(curve_container)
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        curve_layout.addWidget(QLabel("<b>Tone Curve</b>"))
+        
         self.curve_widget = CurveWidget()
+        self.curve_widget.setMinimumSize(256, 256) # Ensure fixed size
+        self.curve_widget.setMaximumSize(256, 256)
         self.curve_widget.curveChanged.connect(self._on_curve_changed)
-        f.addRow(curve_label, self.curve_widget)
+        
+        # Center the curve widget
+        h_layout = QHBoxLayout()
+        h_layout.addStretch()
+        h_layout.addWidget(self.curve_widget)
+        h_layout.addStretch()
+        curve_layout.addLayout(h_layout)
+        
+        main_layout.addWidget(curve_container)
+        
+        # Add spacing
+        main_layout.addSpacing(20)
+        
+        # 2. Sliders Section (using QFormLayout for alignment)
+        sliders_container = QWidget()
+        f = QFormLayout(sliders_container)
+        f.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(sliders_container)
+        
+        # Add sliders to the form layout 'f'
         
         s,l=add_slider(f, QLabel("Clarity"), "clarity", -1,1,DEFAULTS["clarity"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
@@ -423,13 +495,39 @@ class Main(QMainWindow):
         s,l=add_slider(f, QLabel("Vignette"), "vignette", 0,1,DEFAULTS["vignette"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["vignette"]={"s":s,"l":l,"step":0.01}
+        
+        # Defringe
+        s,l=add_slider(f, QLabel("Defringe"), "defringe", 0,1,DEFAULTS["defringe"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["defringe"]={"s":s,"l":l,"step":0.01}
+        
+        # Film Grain
+        f.addRow(QLabel(""))  # Spacer
+        f.addRow(QLabel("<b>Film Grain</b>"))
+        s,l=add_slider(f, QLabel("Amount"), "grain_amount", 0,1,DEFAULTS["grain_amount"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["grain_amount"]={"s":s,"l":l,"step":0.01}
+        s,l=add_slider(f, QLabel("Size"), "grain_size", 0,1,DEFAULTS["grain_size"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["grain_size"]={"s":s,"l":l,"step":0.01}
+        s,l=add_slider(f, QLabel("Roughness"), "grain_roughness", 0,1,DEFAULTS["grain_roughness"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["grain_roughness"]={"s":s,"l":l,"step":0.01}
         s,l=add_slider(f, QLabel("Export Sharpen"), "export_sharpen", 0,1,DEFAULTS["export_sharpen"],0.01,
                        on_change=self.on_change,on_reset=self.on_reset_one,
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end); self.sliders["export_sharpen"]={"s":s,"l":l,"step":0.01}
         btn = QPushButton("Reset Effects")
-        btn.clicked.connect(lambda: self.reset_tab_settings(["clarity", "texture", "denoise", "vignette", "export_sharpen"]))
+        btn.clicked.connect(lambda: self.reset_tab_settings(["clarity", "texture", "denoise", "vignette", "defringe", "grain_amount", "grain_size", "grain_roughness", "export_sharpen"]))
         f.addRow(btn)
-        return g
+        
+        # Wrap in ScrollArea
+        scroll = QScrollArea()
+        scroll.setWidget(g)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        
+        return scroll
 
     def group_hsl(self):
         from ui_helpers import create_chip
@@ -758,6 +856,24 @@ class Main(QMainWindow):
         cur_it = self.items[self.current]
         self.undo_stack.setdefault(name, [dict(cur_it["settings"])])
         self.redo_stack.setdefault(name, [])
+        
+        # Update Info Tab
+        try:
+            from imaging import get_image_metadata
+            fpath = self.project_dir / "images" / name
+            meta = get_image_metadata(str(fpath))
+            self.lbl_name.setText(meta.get("Name", "-"))
+            self.lbl_size.setText(meta.get("Size", "-"))
+            self.lbl_dim.setText(meta.get("Dimensions", "-"))
+            self.lbl_camera.setText(meta.get("Camera", "-"))
+            self.lbl_iso.setText(meta.get("ISO", "-"))
+            self.lbl_aperture.setText(meta.get("Aperture", "-"))
+            self.lbl_shutter.setText(meta.get("Shutter", "-"))
+            self.lbl_lens.setText(meta.get("Lens", "-"))
+            self.lbl_date.setText(meta.get("Date", "-"))
+        except Exception as e:
+            print(f"Error updating info: {e}")
+        
         self.load_settings_to_ui()
         self._mark_active_preset(cur_it.get("applied_preset"))
         self._kick_preview_thread(force=True)
@@ -1554,24 +1670,24 @@ class Main(QMainWindow):
         edit_menu = bar.addMenu("Edit")
         
         action_undo = QAction("Undo", self)
-        action_undo.setShortcut("Ctrl+Z")
+        action_undo.setShortcut(QKeySequence.Undo)
         action_undo.triggered.connect(self.undo_last)
         edit_menu.addAction(action_undo)
         
         action_redo = QAction("Redo", self)
-        action_redo.setShortcut("Ctrl+Shift+Z")
+        action_redo.setShortcut(QKeySequence.Redo)
         action_redo.triggered.connect(self.redo_last)
         edit_menu.addAction(action_redo)
         
         edit_menu.addSeparator()
         
         action_copy = QAction("Copy Settings", self)
-        action_copy.setShortcut("Ctrl+C")
+        action_copy.setShortcut(QKeySequence.Copy)
         action_copy.triggered.connect(self.copy_settings)
         edit_menu.addAction(action_copy)
         
         action_paste = QAction("Paste Settings", self)
-        action_paste.setShortcut("Ctrl+V")
+        action_paste.setShortcut(QKeySequence.Paste)
         action_paste.triggered.connect(self.paste_settings)
         edit_menu.addAction(action_paste)
 

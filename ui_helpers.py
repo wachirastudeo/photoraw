@@ -5,8 +5,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont, QLinearGradient, QBrush, QPen, QPainterPath
 
-def create_app_icon(size=64):
-    """Generates a programmatic app icon."""
+def create_app_pixmap(size=64):
+    """Generates a programmatic app icon pixmap."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     
@@ -40,7 +40,11 @@ def create_app_icon(size=64):
     painter.drawEllipse(QPoint(center - radius*0.3, center - radius*0.3), radius*0.25, radius*0.25)
     
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
+
+def create_app_icon(size=64):
+    """Generates a programmatic app icon."""
+    return QIcon(create_app_pixmap(size))
 
 class DoubleClickSlider(QSlider):
     def __init__(self, orientation, on_double_click=None, parent=None):
