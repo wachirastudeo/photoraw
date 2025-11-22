@@ -1076,27 +1076,42 @@ class Main(QMainWindow):
             use_edge = min(use_edge, 1600) # Use a smaller preview for live dragging
 
         base_override = None
-        # Zooming is dynamic, don't use cache for it.
-        cache = it.setdefault("preview_cache", {}) if not self.is_zoomed else {}
+        cache = it.setdefault("preview_cache", {})
         cache_key = (mode, use_edge)
-        if cache_key in cache:
-            base_override = cache[cache_key]
+        
+        # For zoom mode, we need a processed full-resolution image
+        if self.is_zoomed:
+            # Check if we have a cached processed full image
+            settings_hash = str(sorted(it["settings"].items()))
+            zoom_cache_key = ("zoom_processed", settings_hash, sharpen_amt)
+            
+            if zoom_cache_key not in cache or force:
+                # Process the full image and cache it
+                # This happens once per settings change
+                pass  # Will be processed in worker
+            
+            base_override = None  # Let worker handle zoom processing
         else:
-            from PIL import Image
-            h,w,_ = it["full"].shape
-            if max(h,w)>use_edge:
-                s = use_edge/float(max(h,w))
-                nw,nh = int(w*s), int(h*s)
-                base_override = np.array(Image.fromarray(it["full"]).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+            # Normal mode: use resized base image
+            if cache_key in cache:
+                base_override = cache[cache_key]
             else:
-                base_override = it["full"]
-            cache[cache_key] = base_override
+                from PIL import Image
+                h,w,_ = it["full"].shape
+                if max(h,w)>use_edge:
+                    s = use_edge/float(max(h,w))
+                    nw,nh = int(w*s), int(h*s)
+                    base_override = np.array(Image.fromarray(it["full"]).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+                else:
+                    base_override = it["full"]
+                cache[cache_key] = base_override
 
         req_id = PreviewWorker.next_id()
         worker=PreviewWorker(it["full"], dict(it["settings"]), use_edge, sharpen_amt, mode, req_id,
                              live=self.live_dragging, base_override=base_override,
                              is_zoomed=self.is_zoomed, zoom_point=self.zoom_point_norm,
-                             preview_size=self.preview.size())
+                             preview_size=self.preview.size(),
+                             processed_cache=cache)
         worker.signals.ready.connect(self._show_preview_pix)
         if self.live_dragging:
             self.live_inflight = True

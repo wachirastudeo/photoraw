@@ -8,6 +8,7 @@ __pycache__/
 dist/
 build/
 *.egg
+*.whl
 
 # Virtual Environment
 .venv/
@@ -49,3 +50,11 @@ photoraw/
 # Temporary files
 *.tmp
 *.temp
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Test files
+test_rust.py

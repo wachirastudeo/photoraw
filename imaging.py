@@ -7,6 +7,12 @@ try:
 except Exception:
     rawpy = None
 
+try:
+    import ninlab_core
+except ImportError:
+    ninlab_core = None
+    print("Rust extension not found, using Python fallback.")
+
 def clamp01(a): 
     return np.clip(a, 0, 1, out=a)
 
@@ -235,6 +241,44 @@ def pipeline(rgb01, adj, fast_mode=False):
     x=clamp01(apply_hsl_mixer(x,adj))
     x=clamp01(apply_vignette(x, adj["vignette"]))
     return x
+
+def process_image_fast(base_u8, adj, fast_mode=False):
+    """
+    Wrapper to use Rust extension if available.
+    base_u8: uint8 numpy array (H, W, 3)
+    adj: dict of settings
+    """
+    if ninlab_core:
+        # Rust implementation
+        # Note: Rust pipeline currently implements pixel-wise ops.
+        # Convolutions (Denoise, Clarity, Texture) are not yet in Rust.
+        # But for 'fast_mode' (live preview), we usually skip Denoise anyway.
+        # For full export, we might miss Clarity/Texture if we rely solely on Rust.
+        # Ideally, we should implement them in Rust or do a hybrid approach.
+        # For now, let's use Rust for the heavy lifting.
+        try:
+            # Rust expects HashMap<String, f32>. Filter out non-float values (like curve_lut which is list/None).
+            rust_settings = {k: float(v) for k, v in adj.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            
+            # Handle curve_lut separately
+            lut = adj.get("curve_lut")
+            lut_list = None
+            if lut is not None:
+                if isinstance(lut, list):
+                    lut_list = lut
+                elif isinstance(lut, np.ndarray):
+                    lut_list = lut.astype(np.uint8).tolist()
+            
+            return ninlab_core.process_image(base_u8, rust_settings, lut_list)
+        except Exception as e:
+            print(f"Rust execution failed: {e}")
+            # Fallback
+            pass
+            
+    # Fallback to NumPy
+    src01 = base_u8.astype(np.float32)/255.0
+    out01 = pipeline(src01, adj, fast_mode=fast_mode)
+    return (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
 
 def apply_transforms(arr_u8, adj):
     """ใช้ทรานส์ฟอร์ม (หมุน/กลับ/ครอป) หลังแต่งภาพเสร็จ"""

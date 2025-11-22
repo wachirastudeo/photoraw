@@ -1,0 +1,13 @@
+[package]
+name = "ninlab_core"
+version = "0.1.1"
+edition = "2021"
+
+[lib]
+name = "ninlab_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+numpy = "0.22"
+rayon = "1.10"
