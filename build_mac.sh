@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build script for creating Ninlab.app on macOS
+# Build script for creating Ninlab.app on macOS using PyInstaller
 
-echo "🚀 Building Ninlab for macOS..."
+echo "🚀 Building Ninlab for macOS with PyInstaller..."
 
-# Check if py2app is installed
-if ! python -c "import py2app" 2>/dev/null; then
-    echo "📦 Installing py2app..."
-    pip install py2app
+# Check if PyInstaller is installed
+if ! python -c "import PyInstaller" 2>/dev/null; then
+    echo "📦 Installing PyInstaller..."
+    pip install pyinstaller
 fi
 
 # Clean previous builds
@@ -15,7 +15,7 @@ rm -rf build dist
 
 # Build the app
 echo "🔨 Building app bundle..."
-python setup.py py2app
+pyinstaller Ninlab.spec
 
 # Check if build was successful
 if [ -d "dist/Ninlab.app" ]; then

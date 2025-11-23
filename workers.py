@@ -28,7 +28,7 @@ class PreviewWorker(QRunnable):
     _mutex = QMutex()
     _latest_id = 0
 
-    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None, is_zoomed=False, zoom_point=None, preview_size=None, processed_cache=None):
+    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None, is_zoomed=False, zoom_point=None, preview_size=None, processed_cache=None, low_spec=False):
         super().__init__()
         self.full_rgb=full_rgb
         self.adj=adj
@@ -42,6 +42,7 @@ class PreviewWorker(QRunnable):
         self.zoom_point = zoom_point
         self.preview_size = preview_size
         self.processed_cache = processed_cache or {}
+        self.low_spec = low_spec
         self.signals=PreviewSignals()
         # Prevent the QRunnable from being auto-deleted before signals are emitted
         self.setAutoDelete(False)
@@ -63,6 +64,7 @@ class PreviewWorker(QRunnable):
         if PreviewWorker.is_stale(self.req_id): return
 
         if self.is_zoomed and self.mode == "single":
+            # ... (Zoom logic remains same) ...
             # OPTIMIZATION: Crop-then-Process approach
             # Instead of processing the full image (slow with effects), we:
             # 1. Apply geometric transforms (Rotate/Flip/Crop) to the raw image
@@ -118,7 +120,14 @@ class PreviewWorker(QRunnable):
             self.signals.ready.emit(out)
             return
         else:
-            base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, self.long_edge)
+            # Normal preview logic
+            target_long_edge = self.long_edge
+            
+            # Aggressive downsampling for live preview in low spec mode
+            if self.live and self.low_spec:
+                target_long_edge = max(320, self.long_edge // 2)
+            
+            base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, target_long_edge)
 
         if self.mode == "split":
             # copy to keep base intact
@@ -191,7 +200,11 @@ class ExportWorker(QRunnable):
             progressive=bool(self.opts.get("progressive",True))
             optimize=bool(self.opts.get("optimize",True))
             long_edge=self.opts.get("long_edge",None)
-            suffix=self.opts.get("suffix","_edit") or "_edit"
+            naming_mode = self.opts.get("naming_mode", "Original Name")
+            custom_text = self.opts.get("custom_text", "Photo")
+            start_num = int(self.opts.get("start_num", 1))
+            limit_size_kb = int(self.opts.get("limit_size_kb", 0))
+            
             for i,it in enumerate(self.items, start=1):
                 # full01=it["full"].astype(np.float32)/255.0
                 # out01=pipeline(full01, it["settings"])
@@ -199,12 +212,66 @@ class ExportWorker(QRunnable):
                 out = process_image_fast(it["full"], it["settings"])
                 out=apply_transforms(out, it["settings"])
                 out=self._resize_long_edge(out, long_edge)
-                base=os.path.splitext(os.path.basename(it["name"]))[0]
-                if fmt=="PNG":
-                    Image.fromarray(out).save(os.path.join(self.out_dir, f"{base}{suffix}.png"),"PNG",compress_level=6,optimize=True)
+                
+                # Determine filename
+                if naming_mode == "Custom Name + Sequence":
+                    # Use sequence number: start_num + current index (0-based)
+                    seq = start_num + (i - 1)
+                    filename = f"{custom_text}-{seq:03d}"
                 else:
-                    Image.fromarray(out).save(os.path.join(self.out_dir, f"{base}{suffix}.jpg"),"JPEG",
-                        quality=max(1,min(100,quality)), progressive=progressive, optimize=optimize, subsampling="4:2:0")
+                    base=os.path.splitext(os.path.basename(it["name"]))[0]
+                    filename = f"{base}{suffix}"
+                
+                out_path = os.path.join(self.out_dir, filename)
+                
+                if fmt=="PNG":
+                    Image.fromarray(out).save(f"{out_path}.png","PNG",compress_level=6,optimize=True)
+                else:
+                    # JPEG with optional size limit
+                    save_kwargs = {
+                        "quality": max(1,min(100,quality)),
+                        "progressive": progressive,
+                        "optimize": optimize,
+                        "subsampling": "4:2:0"
+                    }
+                    
+                    if limit_size_kb > 0:
+                        # Try to fit within limit
+                        target_bytes = limit_size_kb * 1024
+                        img_pil = Image.fromarray(out)
+                        
+                        # Binary search for quality if needed, or just iterative
+                        # Simple approach: Try current quality, if too big, reduce.
+                        
+                        import io
+                        buf = io.BytesIO()
+                        img_pil.save(buf, "JPEG", **save_kwargs)
+                        size = buf.tell()
+                        
+                        if size > target_bytes:
+                            # Reduce quality
+                            q_min, q_max = 1, quality
+                            best_q = 1
+                            
+                            # Binary search
+                            while q_min <= q_max:
+                                q_mid = (q_min + q_max) // 2
+                                buf.seek(0); buf.truncate(0)
+                                save_kwargs["quality"] = q_mid
+                                img_pil.save(buf, "JPEG", **save_kwargs)
+                                size = buf.tell()
+                                
+                                if size <= target_bytes:
+                                    best_q = q_mid
+                                    q_min = q_mid + 1
+                                else:
+                                    q_max = q_mid - 1
+                            
+                            # Save with best quality found
+                            save_kwargs["quality"] = best_q
+                            # If best_q is 1 and still too big, we just save it (can't do much more without resize)
+                    
+                    Image.fromarray(out).save(f"{out_path}.jpg","JPEG", **save_kwargs)
                 self.signals.progress.emit(i,total)
             self.signals.done.emit(self.out_dir)
         except Exception as e:

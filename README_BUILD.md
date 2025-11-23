@@ -4,7 +4,7 @@
 
 ### 1. ติดตั้ง Dependencies (ครั้งแรกเท่านั้น)
 ```bash
-pip install py2app
+pip install pyinstaller
 ```
 
 ### 2. Build แอป
@@ -15,15 +15,15 @@ pip install py2app
 หรือ
 
 ```bash
-python setup.py py2app
+pyinstaller Ninlab.spec
 ```
 
 ### 3. ติดตั้งแอป
-หลังจาก build เสร็จ ไฟล์ `PhotoRaw.app` จะอยู่ในโฟลเดอร์ `dist/`
+หลังจาก build เสร็จ ไฟล์ `Ninlab.app` จะอยู่ในโฟลเดอร์ `dist/`
 
 **วิธีติดตั้ง:**
 1. เปิด Finder ไปที่โฟลเดอร์ `dist/`
-2. ลาก `PhotoRaw.app` ไปวางในโฟลเดอร์ `Applications`
+2. ลาก `Ninlab.app` ไปวางในโฟลเดอร์ `Applications`
 3. เสร็จแล้ว! เปิดใช้งานได้จาก Launchpad หรือ Applications
 
 ## หมายเหตุ
@@ -38,7 +38,7 @@ python setup.py py2app
 ถ้าต้องการสร้างไฟล์ติดตั้งแบบ `.dmg`:
 
 ```bash
-hdiutil create -volname "PhotoRaw" -srcfolder dist/PhotoRaw.app -ov -format UDZO PhotoRaw.dmg
+hdiutil create -volname "Ninlab" -srcfolder dist/Ninlab.app -ov -format UDZO Ninlab.dmg
 ```
 
 ## Troubleshooting
@@ -52,7 +52,7 @@ hdiutil create -volname "PhotoRaw" -srcfolder dist/PhotoRaw.app -ov -format UDZO
 
 2. ติดตั้ง dependencies ใหม่:
    ```bash
-   pip install --upgrade py2app PySide6 numpy pillow
+   pip install --upgrade pyinstaller PySide6 numpy pillow
    ```
 
 3. Build อีกครั้ง

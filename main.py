@@ -143,6 +143,12 @@ class Main(QMainWindow):
         self.cmb_sharp.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
         row1.addWidget(self.cmb_sharp)
         
+        # Low Spec Mode
+        self.chk_low_spec = QCheckBox("Low Spec")
+        self.chk_low_spec.setToolTip("Optimize for slower machines (reduce threads, smaller preview)")
+        self.chk_low_spec.toggled.connect(self.toggle_low_spec_mode)
+        row1.addWidget(self.chk_low_spec)
+        
         root.addLayout(row1)
 
         # --- Bottom Layout (Row 2: Edit, Tools, Export) ---
@@ -652,6 +658,29 @@ class Main(QMainWindow):
         self.split_mode = not self.split_mode
         if hasattr(self, "btnBA"):
             self.btnBA.setChecked(self.split_mode)
+        self._kick_preview_thread(force=True)
+
+    def toggle_low_spec_mode(self, enabled):
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        
+        if enabled:
+            # Reduce threads to half or 1
+            max_threads = max(1, cpu_count // 2)
+            self.pool.setMaxThreadCount(max_threads)
+            
+            # Force smaller preview if currently too large
+            current_size = int(self.cmb_prev.currentText())
+            if current_size > 900:
+                self.cmb_prev.setCurrentText("900")
+            
+            self.update_status(f"Low Spec Mode: ON (Threads={max_threads})")
+        else:
+            # Restore threads
+            self.pool.setMaxThreadCount(cpu_count)
+            self.update_status(f"Low Spec Mode: OFF (Threads={cpu_count})")
+            
+        self._remember_ui()
         self._kick_preview_thread(force=True)
 
     # ------- transforms -------
@@ -1437,7 +1466,8 @@ class Main(QMainWindow):
                              live=self.live_dragging, base_override=base_override,
                              is_zoomed=self.is_zoomed, zoom_point=self.zoom_point_norm,
                              preview_size=self.preview.size(),
-                             processed_cache=cache)
+                             processed_cache=cache,
+                             low_spec=self.chk_low_spec.isChecked() if hasattr(self, "chk_low_spec") else False)
         worker.signals.ready.connect(self._show_preview_pix)
         if self.live_dragging:
             self.live_inflight = True

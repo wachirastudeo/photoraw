@@ -11,7 +11,6 @@ DATA_FILES = [
 OPTIONS = {
     'argv_emulation': False,
     'iconfile': 'icon.ico',
-    'codesign_identity': '-',  # Disable code signing
     'plist': {
         'CFBundleName': 'Ninlab',
         'CFBundleDisplayName': 'Ninlab',
@@ -24,6 +23,7 @@ OPTIONS = {
     },
     'packages': ['PySide6', 'numpy', 'PIL'],
     'includes': ['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper'],
+    'excludes': ['PyInstaller'],
 }
 
 setup(
