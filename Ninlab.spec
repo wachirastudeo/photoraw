@@ -1,12 +1,14 @@
-# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 
+hidden_imports = ['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper', 'curve_widget', 'rawpy', 'exifread']
+hidden_imports += collect_submodules('scipy')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('icon.ico', '.')],
-    hiddenimports=['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper', 'curve_widget', 'scipy', 'scipy.interpolate', 'scipy.special', 'scipy.linalg'],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
