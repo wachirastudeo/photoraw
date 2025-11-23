@@ -29,7 +29,30 @@ try:
     img.save(ico_path, format='ICO', sizes=sizes)
     
     print(f"✅ Created high-quality icon.ico with sizes: {sizes}")
-    print(f"New icon.ico size: {os.path.getsize(ico_path)} bytes")
+    
+    # Create Wizard Images for Inno Setup
+    # WizardImageFile (Large): 164x314
+    # WizardSmallImageFile (Small): 55x55
+    
+    # Create a white background for the large image
+    large_bg = Image.new('RGB', (164, 314), (255, 255, 255))
+    # Resize icon to fit nicely (e.g. 128x128)
+    icon_large = img.resize((128, 128), Image.Resampling.LANCZOS)
+    # Center the icon
+    x = (164 - 128) // 2
+    y = (314 - 128) // 2
+    large_bg.paste(icon_large, (x, y), icon_large)
+    large_bg.save("wizard_large.bmp")
+    print("✅ Created wizard_large.bmp")
+    
+    # Create small image
+    small_bg = Image.new('RGB', (55, 55), (255, 255, 255))
+    icon_small = img.resize((48, 48), Image.Resampling.LANCZOS)
+    x = (55 - 48) // 2
+    y = (55 - 48) // 2
+    small_bg.paste(icon_small, (x, y), icon_small)
+    small_bg.save("wizard_small.bmp")
+    print("✅ Created wizard_small.bmp")
     
 except Exception as e:
     print(f"❌ Error: {e}")
@@ -76,4 +99,28 @@ except Exception as e:
         png_img.save(ico_path, format='ICO', sizes=sizes)
         
         print(f"✅ Created high-quality icon.ico")
-        print(f"New icon.ico size: {os.path.getsize(ico_path)} bytes")
+        
+        # Create Wizard Images for Inno Setup
+        # WizardImageFile (Large): 164x314 (recommended)
+        # WizardSmallImageFile (Small): 55x55 (recommended)
+        
+        # Create a white background for the large image
+        large_bg = Image.new('RGB', (164, 314), (255, 255, 255))
+        # Resize icon to fit nicely (e.g. 128x128)
+        icon_large = png_img.resize((128, 128), Image.Resampling.LANCZOS)
+        # Center the icon
+        x = (164 - 128) // 2
+        y = (314 - 128) // 2
+        large_bg.paste(icon_large, (x, y), icon_large)
+        large_bg.save("wizard_large.bmp")
+        print("✅ Created wizard_large.bmp")
+        
+        # Create small image
+        small_bg = Image.new('RGB', (55, 55), (255, 255, 255))
+        icon_small = png_img.resize((48, 48), Image.Resampling.LANCZOS)
+        x = (55 - 48) // 2
+        y = (55 - 48) // 2
+        small_bg.paste(icon_small, (x, y), icon_small)
+        small_bg.save("wizard_small.bmp")
+        print("✅ Created wizard_small.bmp")
+
