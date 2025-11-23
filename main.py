@@ -891,8 +891,8 @@ class Main(QMainWindow):
         # Update Info Tab
         try:
             from imaging import get_image_metadata
-            fpath = self.project_dir / "images" / name
-            meta = get_image_metadata(str(fpath))
+            # name is already the full path
+            meta = get_image_metadata(name)
             self.lbl_name.setText(meta.get("Name", "-"))
             self.lbl_size.setText(meta.get("Size", "-"))
             self.lbl_dim.setText(meta.get("Dimensions", "-"))

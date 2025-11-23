@@ -11,7 +11,7 @@ try:
     import ninlab_core
 except ImportError:
     ninlab_core = None
-    print("Rust extension not found, using Python fallback.")
+    # Silently fall back to Python implementation
 
 def clamp01(a): 
     return np.clip(a, 0, 1, out=a)
@@ -576,7 +576,64 @@ def get_image_metadata(path):
                     if 'ImageWidth' in data and 'ImageHeight' in data:
                         meta["Dimensions"] = f"{data['ImageWidth']} x {data['ImageHeight']}"
                         
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            except FileNotFoundError:
+                # Exiftool not installed, fall back to exifread
+                try:
+                    import exifread
+                    with open(path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                        
+                        if 'Image Model' in tags:
+                            meta["Camera"] = str(tags['Image Model']).strip()
+                        
+                        if 'EXIF ISOSpeedRatings' in tags:
+                            meta["ISO"] = str(tags['EXIF ISOSpeedRatings'])
+                        
+                        if 'EXIF FNumber' in tags:
+                            try:
+                                fnum = tags['EXIF FNumber']
+                                if hasattr(fnum, 'values') and len(fnum.values) > 0:
+                                    val = fnum.values[0]
+                                    if hasattr(val, 'num') and hasattr(val, 'den'):
+                                        meta["Aperture"] = f"f/{val.num/val.den:.1f}"
+                                    else:
+                                        meta["Aperture"] = f"f/{float(val):.1f}"
+                                else:
+                                    meta["Aperture"] = str(fnum)
+                            except:
+                                pass
+                        
+                        if 'EXIF ExposureTime' in tags:
+                            try:
+                                exp = tags['EXIF ExposureTime']
+                                if hasattr(exp, 'values') and len(exp.values) > 0:
+                                    val = exp.values[0]
+                                    if hasattr(val, 'num') and hasattr(val, 'den'):
+                                        if val.num == 1:
+                                            meta["Shutter"] = f"1/{val.den}s"
+                                        else:
+                                            meta["Shutter"] = f"{val.num/val.den:.2f}s"
+                                    else:
+                                        v = float(val)
+                                        if v < 1:
+                                            meta["Shutter"] = f"1/{int(1/v)}s"
+                                        else:
+                                            meta["Shutter"] = f"{v:.2f}s"
+                                else:
+                                    meta["Shutter"] = str(exp)
+                            except:
+                                pass
+                        
+                        if 'EXIF LensModel' in tags:
+                            meta["Lens"] = str(tags['EXIF LensModel']).strip()
+                        
+                        if 'EXIF DateTimeOriginal' in tags:
+                            meta["Date"] = str(tags['EXIF DateTimeOriginal'])
+                        elif 'Image DateTime' in tags:
+                            meta["Date"] = str(tags['Image DateTime'])
+                except:
+                    pass
+            except (subprocess.TimeoutExpired, Exception) as e:
                 print(f"exiftool error: {e}, falling back to rawpy")
             
             # Get dimensions from rawpy
