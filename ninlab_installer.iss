@@ -2,7 +2,7 @@
 ; This creates a professional Windows installer
 
 #define MyAppName "Ninlab"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Wachira Studio"
 #define MyAppURL "https://ninlab.app"
 #define MyAppExeName "Ninlab.exe"
@@ -29,6 +29,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
