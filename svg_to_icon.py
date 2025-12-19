@@ -217,7 +217,7 @@ def create_wizard_images_from_svg(svg_path):
 
 if __name__ == "__main__":
     try:
-        source_svg = "icon.svg"
+        source_svg = "logo.svg"
         output_ico = "icon.ico"
         
         # ตรวจสอบว่ามีไฟล์ SVG หรือไม่
