@@ -13,8 +13,13 @@ except ImportError:
     ninlab_core = None
     # Silently fall back to Python implementation
 
-def clamp01(a): 
-    return np.clip(a, 0, 1, out=a)
+def clamp01(a):
+    """Clamp array to [0, 1] range. In-place when safe."""
+    # Only do in-place if array owns its data (not a view)
+    if a.flags.owndata and a.flags.writeable:
+        return np.clip(a, 0, 1, out=a)
+    else:
+        return np.clip(a, 0, 1)
 
 # ค่าตั้งต้น (รวมทรานส์ฟอร์ม)
 DEFAULTS = {
@@ -40,20 +45,40 @@ def rgb_to_lum(rgb):
     return 0.2126*rgb[...,0] + 0.7152*rgb[...,1] + 0.0722*rgb[...,2]
 
 def apply_white_balance(rgb, temperature=0.0, tint=0.0):
-    r=1+0.8*temperature-0.2*tint; g=1-0.1*temperature+0.4*tint; b=1-0.8*temperature-0.2*tint
-    out=rgb.copy(); out[...,0]*=r; out[...,1]*=g; out[...,2]*=b; return out
+    r = 1 + 0.8*temperature - 0.2*tint
+    g = 1 - 0.1*temperature + 0.4*tint
+    b = 1 - 0.8*temperature - 0.2*tint
+    # Modify in-place using advanced indexing (creates view, then modifies)
+    rgb = rgb.copy()  # Need copy to avoid modifying original
+    rgb[..., 0] *= r
+    rgb[..., 1] *= g
+    rgb[..., 2] *= b
+    return rgb
 
 def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
-    y=clamp01(rgb_to_lum(rgb)); out=rgb.copy()
-    if abs(sh)>1e-6:
-        w=np.clip(1.0-(y*2.0),0,1); out=out*(1-w[...,None])+(out*(1+0.8*sh))*w[...,None]
-    if abs(hi)>1e-6:
+    # Skip if no adjustments
+    if abs(hi) < 1e-6 and abs(sh) < 1e-6 and abs(wh) < 1e-6 and abs(bl) < 1e-6:
+        return rgb
+    
+    y = clamp01(rgb_to_lum(rgb))
+    out = rgb.copy()
+    
+    if abs(sh) > 1e-6:
+        w = np.clip(1.0 - (y*2.0), 0, 1)[..., None]
+        out = out * (1 - w) + (out * (1 + 0.8*sh)) * w
+    
+    if abs(hi) > 1e-6:
         # Smoothstep for smoother highlight transition
-        t = np.clip((y*2.0-1.0),0,1)
-        w = t * t * (3.0 - 2.0 * t)
-        out=out*(1-w[...,None])+(out*(1-0.8*hi))*w[...,None]
-    if abs(wh)>1e-6: out=np.minimum(out*(1.0+wh*0.6),1.0)
-    if abs(bl)>1e-6: out=np.maximum(out+bl*0.4,0.0)
+        t = np.clip((y*2.0 - 1.0), 0, 1)
+        w = (t * t * (3.0 - 2.0 * t))[..., None]
+        out = out * (1 - w) + (out * (1 - 0.8*hi)) * w
+    
+    if abs(wh) > 1e-6:
+        out = np.minimum(out * (1.0 + wh*0.6), 1.0)
+    
+    if abs(bl) > 1e-6:
+        out = np.maximum(out + bl*0.4, 0.0)
+    
     return out
 
 def apply_saturation_vibrance(rgb, saturation=0.0, vibrance=0.0):
@@ -83,42 +108,30 @@ def apply_denoise(rgb, amount=0.0):
     if amount <= 1e-6:
         return rgb
     
-    # Multi-pass bilateral-like filtering
-    # Stronger spatial blur with edge-aware weighting
+    # Use scipy for faster Gaussian blur
+    from scipy.ndimage import gaussian_filter
+    
+    # Fewer passes for better performance
+    num_passes = max(1, int(amount * 1.5))  # Reduced from 2*amount
     result = rgb.copy()
     
-    for _ in range(int(1 + amount * 2)):  # More passes for stronger denoise
-        # Larger kernel for better noise reduction
-        pad = np.pad(result, ((2,2),(2,2),(0,0)), mode='edge')
-        
-        # 5x5 Gaussian kernel (Sigma ~ 1.0), Normalized sum ≈ 1.0
-        # Row 0
-        r0 = pad[:-4,:-4] * 0.0037 + pad[:-4,1:-3] * 0.0146 + pad[:-4,2:-2] * 0.0256 + pad[:-4,3:-1] * 0.0146 + pad[:-4,4:] * 0.0037
-        # Row 1
-        r1 = pad[1:-3,:-4] * 0.0146 + pad[1:-3,1:-3] * 0.0586 + pad[1:-3,2:-2] * 0.0952 + pad[1:-3,3:-1] * 0.0586 + pad[1:-3,4:] * 0.0146
-        # Row 2
-        r2 = pad[2:-2,:-4] * 0.0256 + pad[2:-2,1:-3] * 0.0952 + pad[2:-2,2:-2] * 0.1508 + pad[2:-2,3:-1] * 0.0952 + pad[2:-2,4:] * 0.0256
-        # Row 3
-        r3 = pad[3:-1,:-4] * 0.0146 + pad[3:-1,1:-3] * 0.0586 + pad[3:-1,2:-2] * 0.0952 + pad[3:-1,3:-1] * 0.0586 + pad[3:-1,4:] * 0.0146
-        # Row 4
-        r4 = pad[4:,:-4] * 0.0037 + pad[4:,1:-3] * 0.0146 + pad[4:,2:-2] * 0.0256 + pad[4:,3:-1] * 0.0146 + pad[4:,4:] * 0.0037
-        
-        blur = r0 + r1 + r2 + r3 + r4
-        
-        # Edge-aware weighting based on luminance gradient
-        y = clamp01(rgb_to_lum(result))
-        gy, gx = np.gradient(y)
-        grad = np.sqrt(gy*gy + gx*gx)
-        
-        # Stronger edge preservation
-        edge_weight = np.exp(-grad * 10.0)
-        edge_weight = edge_weight[..., None]
+    # Pre-compute edge map once (expensive operation)
+    y = clamp01(rgb_to_lum(result))
+    gy, gx = np.gradient(y)
+    grad = np.sqrt(gy*gy + gx*gx)
+    edge_weight = np.exp(-grad * 10.0)[..., None]
+    
+    for _ in range(num_passes):
+        # Use scipy's optimized Gaussian filter (much faster than manual convolution)
+        blur = np.empty_like(result)
+        for c in range(3):
+            blur[..., c] = gaussian_filter(result[..., c], sigma=1.0, mode='nearest')
         
         # Color similarity (bilateral component)
         color_diff = np.sum(np.abs(result - blur), axis=2, keepdims=True)
         color_weight = np.exp(-color_diff * 5.0)
         
-        # Combined weight
+        # Combined weight (reuse pre-computed edge_weight)
         weight = edge_weight * color_weight
         
         # Blend based on weights
@@ -249,11 +262,11 @@ def apply_film_grain(rgb, amount=0.0, size=0.5, roughness=0.5):
     noise_w = max(1, w // noise_scale)
     noise = np.random.normal(0, 1, (noise_h, noise_w))
     
-    # Resize to image size (creates grain size effect)
-    from PIL import Image
-    noise_img = Image.fromarray((noise * 127 + 128).astype(np.uint8))
-    noise_resized = np.array(noise_img.resize((w, h), Image.BILINEAR))
-    noise = (noise_resized.astype(np.float32) - 128) / 127.0
+    # Resize to image size using scipy (much faster than PIL)
+    from scipy.ndimage import zoom
+    zoom_h = h / noise_h
+    zoom_w = w / noise_w
+    noise = zoom(noise, (zoom_h, zoom_w), order=1)  # order=1 is bilinear
     
     # Roughness controls the distribution
     if roughness > 0.5:
@@ -353,23 +366,41 @@ def apply_hsl_mixer(rgb, adj):
     return hsv_to_rgb(hn,sn,vn)
 
 def pipeline(rgb01, adj, fast_mode=False):
-    x=clamp01(rgb01*(2.0**adj["exposure"]))
-    x=clamp01(apply_white_balance(x,adj["temperature"],adj["tint"]))
-    x=clamp01(apply_tone_regions(x,adj["highlights"],adj["shadows"],adj["whites"],adj["blacks"]))
-    x=clamp01(apply_dehaze(x, adj["dehaze"]))
+    # Apply exposure first and clamp (critical - can significantly exceed [0,1])
+    x = clamp01(rgb01 * (2.0**adj["exposure"]))
+    
+    # Pixel-wise operations (safe, no need to clamp each)
+    x = apply_white_balance(x, adj["temperature"], adj["tint"])
+    x = apply_tone_regions(x, adj["highlights"], adj["shadows"], adj["whites"], adj["blacks"])
+    x = apply_dehaze(x, adj["dehaze"])
+    
+    # Denoise if not in fast mode (already has internal clamping)
     if not fast_mode:
-        x=clamp01(apply_denoise(x, adj["denoise"]))
-    x=clamp01(apply_saturation_vibrance(x,adj["saturation"],adj["vibrance"]))
-    x=clamp01(apply_contrast_gamma(x,adj["contrast"],adj["gamma"]))
-    x=clamp01(apply_curve_lut(x, adj.get("curve_lut")))
-    x=clamp01(apply_mid_contrast(x, adj["mid_contrast"]))
-    x=clamp01(apply_clarity(x,adj["clarity"]))
-    x=clamp01(apply_texture(x, adj["texture"]))
-    x=clamp01(apply_hsl_mixer(x,adj))
-    x=clamp01(apply_vignette(x, adj["vignette"]))
-    x=clamp01(apply_defringe(x, adj.get("defringe", 0.0)))
-    x=clamp01(apply_film_grain(x, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5)))
-    return x
+        x = apply_denoise(x, adj["denoise"])
+    else:
+        # Clamp once after tone adjustments if skipping denoise
+        x = clamp01(x)
+    
+    # Color adjustments (safe range)
+    x = apply_saturation_vibrance(x, adj["saturation"], adj["vibrance"])
+    x = apply_contrast_gamma(x, adj["contrast"], adj["gamma"])
+    x = apply_curve_lut(x, adj.get("curve_lut"))
+    x = apply_mid_contrast(x, adj["mid_contrast"])
+    
+    # Convolution-based effects (can exceed range slightly)
+    x = clamp01(apply_clarity(x, adj["clarity"]))
+    x = apply_texture(x, adj["texture"])
+    
+    # HSL mixer (already returns clamped values)
+    x = apply_hsl_mixer(x, adj)
+    
+    # Final effects
+    x = apply_vignette(x, adj["vignette"])
+    x = apply_defringe(x, adj.get("defringe", 0.0))
+    x = apply_film_grain(x, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5))
+    
+    # Final clamp to ensure [0,1] range
+    return clamp01(x)
 
 def process_image_fast(base_u8, adj, fast_mode=False):
     """

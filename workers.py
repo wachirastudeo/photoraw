@@ -54,11 +54,19 @@ class PreviewWorker(QRunnable):
     def is_stale(cls, rid):
         cls._mutex.lock(); stale = rid < cls._latest_id; cls._mutex.unlock(); return stale
 
-    def _resize_long(self, arr, long_edge):
-        h,w,_=arr.shape; cur=max(h,w)
-        if cur<=long_edge: return arr
-        s=long_edge/float(cur); nw,nh=int(w*s),int(h*s)
-        return np.array(Image.fromarray(arr).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+    def _resize_long(self, arr, long_edge, use_fast=False):
+        """Resize image maintaining aspect ratio
+        use_fast: Use NEAREST resampling (faster) instead of LANCZOS (better quality)
+        """
+        h, w, _ = arr.shape
+        cur = max(h, w)
+        if cur <= long_edge:
+            return arr
+        s = long_edge / float(cur)
+        nw, nh = int(w * s), int(h * s)
+        # Use faster resampling for live preview, higher quality for final
+        resample = Image.NEAREST if use_fast else Image.LANCZOS
+        return np.array(Image.fromarray(arr).resize((nw, nh), resample), dtype=np.uint8)
 
     def run(self):
         if PreviewWorker.is_stale(self.req_id): return
@@ -125,9 +133,15 @@ class PreviewWorker(QRunnable):
             
             # Aggressive downsampling for live preview in low spec mode
             if self.live and self.low_spec:
-                target_long_edge = max(320, self.long_edge // 2)
+                target_long_edge = max(320, self.long_edge // 3)  # More aggressive: //3 instead of //2
+            elif self.live:
+                # Even in normal mode, use smaller preview during live adjustment
+                target_long_edge = max(480, self.long_edge // 2)
             
-            base = self.base_override if self.base_override is not None else self._resize_long(self.full_rgb, target_long_edge)
+            # Use fast resize during live preview, quality resize otherwise
+            base = self.base_override if self.base_override is not None else self._resize_long(
+                self.full_rgb, target_long_edge, use_fast=self.live
+            )
 
         if self.mode == "split":
             # copy to keep base intact
