@@ -1,4 +1,4 @@
-import sys
+import sys, os
 import numpy as np
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, QLocale
@@ -17,6 +17,7 @@ from workers import DecodeWorker, PreviewWorker, ExportWorker
 from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout, create_app_icon
 from export_dialog import ExportOptionsDialog
 from cropper import CropDialog
+from library_view import LibraryView
 
 
 _COLOR_SWATCH = {
@@ -79,38 +80,49 @@ class Main(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # --- Top Layout (Row 1: Project, File, View) ---
+        # --- Top Layout (Row 1: Mode -> Project -> Actions -> View) ---
         row1 = QHBoxLayout()
-        row1.setSpacing(8)
+        row1.setSpacing(12)
         
-        # Project Info
+        # 1. Mode Switcher (Left)
+        mode_layout = QHBoxLayout(); mode_layout.setSpacing(0)
+        self.btnModeLib = QPushButton("Library"); self.btnModeLib.setCheckable(True)
+        self.btnModeLib.clicked.connect(self.mode_library)
+        self.btnModeDev = QPushButton("Develop"); self.btnModeDev.setCheckable(True)
+        self.btnModeDev.clicked.connect(self.mode_develop)
+        style_mode = "QPushButton{border:0px; border-radius:0px; padding:6px 16px; background:#3f3f46; color:#a1a1aa; font-weight:bold;} QPushButton:checked{background:#4f46e5; color:white;} QPushButton:hover:!checked{background:#52525b;}"
+        self.btnModeLib.setStyleSheet(style_mode + "QPushButton{border-top-left-radius:6px; border-bottom-left-radius:6px;}")
+        self.btnModeDev.setStyleSheet(style_mode + "QPushButton{border-top-right-radius:6px; border-bottom-right-radius:6px;}")
+        mode_layout.addWidget(self.btnModeLib); mode_layout.addWidget(self.btnModeDev)
+        row1.addLayout(mode_layout)
+
+        # 2. Project Info
+        row1.addWidget(QLabel("|")); row1.addWidget(QLabel("Project:"))
         self.lab_project = QLabel(self.project_display_name)
-        self.lab_project.setStyleSheet("font-weight:bold; color:#e0e7ff; padding:0 4px;")
-        self.lab_project.setToolTip(str(self.project_dir))
-        row1.addWidget(QLabel("Project:"))
+        self.lab_project.setStyleSheet("font-weight:bold; color:#e0e7ff;")
         row1.addWidget(self.lab_project)
         
-        # File Actions
-        btnNew = QPushButton("New"); btnNew.setToolTip("New Project"); btnNew.clicked.connect(self.new_project)
-        btnSwitch = QPushButton("Switch"); btnSwitch.setToolTip("Switch Project"); btnSwitch.clicked.connect(self.switch_project)
-        btnImport = QPushButton("Import Images"); btnImport.clicked.connect(self.import_images)
+        # 3. Common Actions (Import, Delete - useful in both)
+        btnImport = QPushButton("Import"); btnImport.setToolTip("Import Images"); btnImport.clicked.connect(self.import_images)
         btnDelete = QPushButton("Delete"); btnDelete.clicked.connect(self.delete_selected)
-        btnNew.setFixedWidth(60); btnSwitch.setFixedWidth(80); btnImport.setFixedWidth(120); btnDelete.setFixedWidth(80)
-        row1.addWidget(btnNew); row1.addWidget(btnSwitch); row1.addWidget(btnImport); row1.addWidget(btnDelete)
+        btnStarRow = QPushButton("Star ★"); btnStarRow.setCheckable(False); btnStarRow.clicked.connect(self.toggle_star_selected)
+        row1.addWidget(btnImport); row1.addWidget(btnDelete); row1.addWidget(btnStarRow)
         
-        # Shortcuts
-        from PySide6.QtGui import QKeySequence
-        QShortcut(QKeySequence.Delete, self, self.delete_selected)
-        QShortcut(QKeySequence(Qt.Key_Backspace), self, self.delete_selected)
-        QShortcut(QKeySequence.Undo, self, self.undo_last)
-        QShortcut(QKeySequence.Redo, self, self.redo_last)
-        QShortcut(QKeySequence.Copy, self, self.copy_settings)
-        QShortcut(QKeySequence.Paste, self, self.paste_settings)
-        QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.select_next_item(-1))
-        QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.select_next_item(1))
+        # Sort
+        row1.addWidget(QLabel("Sort:"))
+        self.cmbSort = QComboBox(); self.cmbSort.addItems(["Name", "Date (Newest)", "Date (Oldest)", "Star"])
+        self.cmbSort.currentTextChanged.connect(self.sort_items)
+        row1.addWidget(self.cmbSort)
         
-        # View Actions
+        # New/Switch Project (Moved to Menu or small icons?) -> Keep simpler buttons
+        btnProj = QPushButton("Switch"); btnProj.clicked.connect(self.switch_project)
+        row1.addWidget(btnProj)
+
         row1.addStretch(1) # Spacer
+
+        # 4. View Controls (Zoom, Split, Filter, settings) -> Grouped to Hide
+        self.view_controls_widget = QWidget()
+        vc_layout = QHBoxLayout(self.view_controls_widget); vc_layout.setContentsMargins(0,0,0,0); vc_layout.setSpacing(8)
         
         self.btnZoomFit = QPushButton("Fit"); self.btnZoomFit.setCheckable(True); self.btnZoomFit.setChecked(True)
         self.btnZoomFit.clicked.connect(self.zoom_fit); self.btnZoomFit.setFixedWidth(50)
@@ -121,37 +133,63 @@ class Main(QMainWindow):
         self.btnSplit = QPushButton("Before/After"); self.btnSplit.setCheckable(True)
         self.btnSplit.clicked.connect(self.toggle_split); self.btnSplit.setFixedWidth(100)
         
-        row1.addWidget(self.btnZoomFit); row1.addWidget(self.btnZoom100); row1.addWidget(self.btnSplit)
+        vc_layout.addWidget(self.btnZoomFit); vc_layout.addWidget(self.btnZoom100); vc_layout.addWidget(self.btnSplit)
         
-        # Filter
-        row1.addWidget(QLabel("  Filter:"))
+        vc_layout.addWidget(QLabel("  Filter:"))
         self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred"])
         self.filterBox.currentTextChanged.connect(self.apply_filter)
-        row1.addWidget(self.filterBox)
+        vc_layout.addWidget(self.filterBox)
 
-        # Preview Size & Sharpness
-        row1.addWidget(QLabel("  Size:"))
+        # Preview Settings
+        vc_layout.addWidget(QLabel("  Size:"))
         self.cmb_prev = QComboBox(); self.cmb_prev.addItems(["540","720","900","1200","1600","2048"]); self.cmb_prev.setCurrentText("1200")
-        self.cmb_prev.setToolTip("Preview Size (px)")
         self.cmb_prev.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
-        row1.addWidget(self.cmb_prev)
+        vc_layout.addWidget(self.cmb_prev)
         
-        row1.addWidget(QLabel("  Sharp:"))
-        self.cmb_sharp = QComboBox(); self.cmb_sharp.addItems(["0.00","0.15","0.30","0.45","0.60","0.80","1.00"])
-        self.cmb_sharp.setCurrentText("0.30")
-        self.cmb_sharp.setToolTip("Preview Sharpness")
+        self.cmb_sharp = QComboBox(); self.cmb_sharp.addItems(["0.00","0.15","0.30","0.45","0.60","0.80","1.00"]); self.cmb_sharp.setCurrentText("0.30")
         self.cmb_sharp.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
-        row1.addWidget(self.cmb_sharp)
+        vc_layout.addWidget(QLabel("Sharp:")); vc_layout.addWidget(self.cmb_sharp)
         
-        # Low Spec Mode
         self.chk_low_spec = QCheckBox("Low Spec")
-        self.chk_low_spec.setToolTip("Optimize for slower machines (reduce threads, smaller preview)")
         self.chk_low_spec.toggled.connect(self.toggle_low_spec_mode)
-        row1.addWidget(self.chk_low_spec)
+        vc_layout.addWidget(self.chk_low_spec)
+        
+        row1.addWidget(self.view_controls_widget)
+
+        # Shortcuts (Init here)
+        from PySide6.QtGui import QKeySequence
+        QShortcut(QKeySequence.Delete, self, self.delete_selected)
+        QShortcut(QKeySequence(Qt.Key_Backspace), self, self.delete_selected)
+        QShortcut(QKeySequence.Undo, self, self.undo_last)
+        QShortcut(QKeySequence.Redo, self, self.redo_last)
+        QShortcut(QKeySequence.Copy, self, self.copy_settings)
+        QShortcut(QKeySequence.Paste, self, self.paste_settings)
+        QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.select_next_item(1))
         
         root.addLayout(row1)
 
-        # --- Bottom Layout (Row 2: Edit, Tools, Export) ---
+
+        # --- Stacked Widget (Library vs Develop) ---
+        self.stack = 5  # Placeholder import fix check? No, actual widget
+        from PySide6.QtWidgets import QStackedWidget
+        self.stack = QStackedWidget()
+        
+        # Page 1: Library View
+        self.library_view = LibraryView()
+        self.library_view.sig_open_edit.connect(self._on_library_edit)
+        self.library_view.sig_rating_changed.connect(self._on_library_rating)
+        self.stack.addWidget(self.library_view)
+        
+        # Page 2: Develop View (Container for existing Row 2 + Content)
+        self.page_develop = QWidget()
+        dev_layout = QVBoxLayout(self.page_develop)
+        dev_layout.setContentsMargins(0,0,0,0)
+        dev_layout.setSpacing(10)
+        self.stack.addWidget(self.page_develop)
+        
+        root.addWidget(self.stack, 1) # Stack takes main space
+
+        # --- Develop Layout (Row 2: Edit, Tools, Export) ---
         row2 = QHBoxLayout()
         row2.setSpacing(6)
         
@@ -184,7 +222,7 @@ class Main(QMainWindow):
         btnExpAll = QPushButton("Export All"); btnExpAll.clicked.connect(self.export_all)
         row2.addWidget(btnExpSel); row2.addWidget(btnExpStar); row2.addWidget(btnExpAll)
         
-        root.addLayout(row2)
+
 
         # Remember UI settings
         # Remember UI settings
@@ -223,8 +261,12 @@ class Main(QMainWindow):
 
         right_wrap = QWidget(); right_wrap.setLayout(right_panel)
         right_wrap.setFixedWidth(500)  # wider tool panel for better visibility
+
         content.addWidget(right_wrap, 0)
-        root.addLayout(content, 1)
+        
+        # Add Row2 and Content to Develop Page
+        dev_layout.addLayout(row2)
+        dev_layout.addLayout(content, 1)
 
         # filmstrip
         self.film=create_filmstrip(QSize(72,48), height=68)
@@ -306,6 +348,11 @@ class Main(QMainWindow):
         # Restore images from the loaded project
         self._restore_project_images()
         
+        # Start in Library Mode if items exist, otherwise stick to current (or Library empty)
+        # But wait, helper functions for mode switching need to be defined first? 
+        # Python allows calling methods defined later.
+        self.mode_library()
+
         self.showMaximized()
 
     # ------- groups -------
@@ -857,7 +904,7 @@ class Main(QMainWindow):
         start_idx = len(self.items) - len(new_files)
         for i in range(start_idx, len(self.items)):
             item = self.items[i]
-            w=DecodeWorker(item["name"], thumb_w=72, thumb_h=48)
+            w=DecodeWorker(item["name"], thumb_w=256, thumb_h=170)
             w.signals.done.connect(self._on_decoded)
             w.signals.error.connect(lambda m: QMessageBox.warning(self,"Error",m))
             self.pool.start(w)
@@ -866,9 +913,18 @@ class Main(QMainWindow):
         idx=next((i for i,v in enumerate(self.items) if v["name"]==item["name"]),-1)
         if idx>=0:
             self.items[idx]["full"]=item["full"]; self.items[idx]["thumb"]=item["thumb"]
+            # Create Pixmap
             pm = QPixmap.fromImage(qimage_from_u8(item["thumb"]))
-            pm = badge_star(pm, self.items[idx].get("star",False))
-            if self._pass_filter(self.items[idx]): filmstrip_add_item(self.film, pm, userdata=item["name"])
+            starred = self.items[idx].get("star",False)
+            pm_badged = badge_star(pm, starred)
+            
+            if self._pass_filter(self.items[idx]): 
+                # Add to Filmstrip
+                filmstrip_add_item(self.film, pm_badged, userdata=item["name"])
+                # Add to Library View
+                if hasattr(self, 'library_view'):
+                    self.library_view.add_item(self.items[idx]["name"], pm_badged, starred)
+            
             if self.current<0 and self.film.count()>0: self.film.setCurrentRow(0)
             self.loaded+=1; self.update_status()
 
@@ -910,16 +966,36 @@ class Main(QMainWindow):
         self._kick_preview_thread(force=True)
 
     def toggle_star_selected(self):
-        rows=self.film.selectedIndexes()
-        if not rows: return
-        names=[self.film.item(r.row()).data(Qt.UserRole) for r in rows]
-        for it in self.items:
-            if it["name"] in names: it["star"]=not it.get("star",False)
-        self.rebuild_filmstrip()
-        if self.current >= 0:
-            self._persist_current_item()
+        names = set()
+        if self.stack.currentIndex() == 0 and hasattr(self, 'library_view'):
+             for item in self.library_view.grid.selectedItems():
+                 names.add(item.data(Qt.UserRole))
         else:
-            self._remember_ui()
+             rows=self.film.selectedIndexes()
+             if rows:
+                 names={self.film.item(r.row()).data(Qt.UserRole) for r in rows}
+        
+        if not names: return
+
+        changed = False
+        for it in self.items:
+            if it["name"] in names: 
+                it["star"]=not it.get("star",False)
+                # Update catalog
+                if it["name"] not in self.catalog: self.catalog[it["name"]]={}
+                self.catalog[it["name"]]["star"] = it["star"]
+                changed = True
+        
+        if changed:
+            save_catalog(self.catalog, self.project_dir)
+            self.rebuild_filmstrip()
+            if hasattr(self, 'library_view'):
+                 self._refresh_library_grid()
+                 
+            # Restore selection if in develop mode
+            if self.stack.currentIndex() != 0 and self.film.count() > 0:
+                 pass # Filmstrip selection might be lost or kept? rebuild_filmstrip clears... 
+                 # Currently we accept selection loss or we can improve rebuild_filmstrip later.
 
     def apply_filter(self, text):
         self.view_filter=text; self.rebuild_filmstrip()
@@ -1390,15 +1466,33 @@ class Main(QMainWindow):
         self.update_status("Pasted settings")
 
     def delete_selected(self):
-        rows=self.film.selectedIndexes()
-        if not rows: QMessageBox.information(self,"Info","No selection"); return
-        names={self.film.item(r.row()).data(Qt.UserRole) for r in rows}
-        self.items=[it for it in self.items if it["name"] not in names]
+        names_to_delete = set()
+        
+        # Check active mode
+        if self.stack.currentIndex() == 0 and hasattr(self, 'library_view'): # Library
+             for item in self.library_view.grid.selectedItems():
+                 names_to_delete.add(item.data(Qt.UserRole))
+        else: # Develop (Filmstrip)
+             rows=self.film.selectedIndexes()
+             names_to_delete={self.film.item(r.row()).data(Qt.UserRole) for r in rows}
+             
+        if not names_to_delete: 
+            QMessageBox.information(self,"Info","No selection")
+            return
+            
+        if QMessageBox.question(self, "Confirm Delete", f"Remove {len(names_to_delete)} images from project?", QMessageBox.Yes|QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        self.items=[it for it in self.items if it["name"] not in names_to_delete]
         for name in list(self.catalog.keys()):
-            if name in names:
+            if name in names_to_delete:
                 self.catalog.pop(name, None)
         save_catalog(self.catalog, self.project_dir)
+        
         self.rebuild_filmstrip()
+        if hasattr(self, 'library_view'):
+            self._refresh_library_grid()
+            
         if self.film.count()>0: self.film.setCurrentRow(0)
         else: self.current=-1; self.preview.setPixmap(QPixmap())
         self.update_status("Removed selected")
@@ -1767,6 +1861,64 @@ class Main(QMainWindow):
             h_aqua=10, s_aqua=0.1,                     # Aqua -> Teal
             vignette=0.15, export_sharpen=0.3
         ),
+
+        # --- New Presets ---
+        
+        # 1. Kodak Portra 400 (Approx) - Warm, good skin tones, soft contrast
+        "Kodak Portra 400": base(
+            temperature=0.08, tint=0.02,        # Slightly warm
+            contrast=0.05, mid_contrast=-0.05,  # Soft contrast
+            highlights=-0.1, shadows=0.15,      # Improved dynamic range
+            vibrance=0.15, saturation=-0.05,    # Rich but not oversaturated
+            h_yellow=-10, s_yellow=0.1,         # Warm yellows
+            h_orange=-5, s_orange=0.05,         # Healthy skin
+            grain_amount=0.15, grain_size=0.1,  # Fine grain
+            export_sharpen=0.2
+        ),
+
+        # 2. Fuji Velvia 50 (Approx) - VIVID, high contrast, strong nature colors
+        "Fuji Velvia 50": base(
+            contrast=0.25, mid_contrast=0.1,    # High contrast
+            saturation=0.25, vibrance=0.2,      # Very colorful
+            blacks=-0.1,                        # Deep blacks
+            h_green=10, s_green=0.2,            # Lush greens
+            h_blue=-5, s_blue=0.2,              # Deep sky blues
+            l_blue=-0.1,
+            clarity=0.15,
+            export_sharpen=0.4
+        ),
+
+        # 3. Bright & Airy - Clean, bright, low contrast
+        "Bright & Airy": base(
+            exposure=0.3,                       # Brighter
+            contrast=-0.15, mid_contrast=-0.1,  # Lower contrast
+            highlights=-0.2, shadows=0.3,       # Open up shadows
+            vibrance=0.1, saturation=-0.1,      # Clean colors
+            temperature=-0.02,                  # Neutral/Slightly cool
+            clarity=0.05, texture=-0.05         # Soft but clear
+        ),
+
+        # 4. Moody Dark - Desaturated, dimmed, dramatic
+        "Moody Dark": base(
+            exposure=-0.3,                      # Darker
+            contrast=0.15, mid_contrast=0.1,    # High contrast
+            highlights=-0.4, shadows=-0.1,      # Muted highlights
+            saturation=-0.4, vibrance=-0.2,     # Desaturated
+            vignette=0.4,                       # Strong vignette
+            temperature=-0.05,                  # Slightly cool
+            grain_amount=0.2
+        ),
+
+        # 5. Golden Hour - Sunset look
+        "Golden Hour": base(
+            temperature=0.25, tint=0.1,         # Very warm
+            highlights=-0.2, whites=-0.1,       # Soft highlights
+            shadows=0.15,
+            h_yellow=-15, s_yellow=0.2, l_yellow=0.1, # Golden sunlight
+            h_orange=-5, s_orange=0.15,
+            contrast=0.1,
+            vignette=0.2
+        ),
     }
 
     def _seed_default_presets(self):
@@ -1866,7 +2018,7 @@ class Main(QMainWindow):
                 
                 self.items.append(item)
                 
-                w = DecodeWorker(p, thumb_w=72, thumb_h=48)
+                w = DecodeWorker(p, thumb_w=256, thumb_h=170)
                 w.signals.done.connect(self._on_decoded)
                 w.signals.error.connect(lambda m: print(f"Error loading: {m}"))
                 self.pool.start(w)
@@ -2180,6 +2332,96 @@ class Main(QMainWindow):
         list_widget.itemDoubleClicked.connect(on_ok)
         
         dlg.exec()
+
+
+    # ------- Library Mode Helper Methods -------
+    def mode_library(self):
+        self.stack.setCurrentIndex(0)
+        self.btnModeLib.setChecked(True)
+        self.btnModeDev.setChecked(False)
+        self.film.setVisible(False) 
+        self.view_controls_widget.setVisible(False) # Hide view controls in Library
+        
+        # Optional: Refresh grid if it's empty but we have items
+        if hasattr(self, 'library_view') and self.library_view.grid.count() == 0 and len(self.items) > 0:
+            self._refresh_library_grid()
+        self.update_status("Library Mode")
+        self.setWindowTitle(f"Ninlab - {self.project_display_name} [LIBRARY]")
+
+    def mode_develop(self):
+        self.stack.setCurrentIndex(1)
+        self.btnModeLib.setChecked(False)
+        self.btnModeDev.setChecked(True)
+        self.film.setVisible(True)
+        self.view_controls_widget.setVisible(True) # Show view controls in Develop
+        
+        if hasattr(self, 'library_view') and self.library_view.grid.currentRow() >= 0:
+            pass
+        self._on_tab_changed(self.tabs.currentIndex())
+        self.update_status("Develop Mode")
+        self.setWindowTitle(f"Ninlab - {self.project_display_name} [DEVELOP]")
+
+    def _on_library_edit(self, index):
+        """Called when user double clicks an item in library grid"""
+        if 0 <= index < self.film.count():
+             self.film.setCurrentRow(index)
+             self.mode_develop()
+
+    def _on_library_rating(self, grid_row, star_status):
+        """Called when user rates an item in library grid"""
+        if 0 <= grid_row < self.film.count():
+            film_item = self.film.item(grid_row)
+            name = film_item.data(Qt.UserRole)
+            real_idx = next((i for i,v in enumerate(self.items) if v["name"]==name), -1)
+            
+            if real_idx >= 0:
+                new_state = not self.items[real_idx].get("star", False)
+                self.items[real_idx]["star"] = new_state
+                self._persist_current_item() 
+                
+                # Update UI
+                self.library_view.update_item(grid_row, starred=new_state, name=name)
+                
+                pm = QPixmap.fromImage(qimage_from_u8(self.items[real_idx]["thumb"]))
+                pm = badge_star(pm, new_state)
+                film_item.setIcon(QIcon(pm))
+
+    def _refresh_library_grid(self):
+        """Re-populates the library grid from current items (considering filter)"""
+        if not hasattr(self, 'library_view'): return
+        self.library_view.clear()
+        for it in self.items:
+            if self._pass_filter(it):
+                if it["thumb"] is not None:
+                     pm = QPixmap.fromImage(qimage_from_u8(it["thumb"]))
+                     starred = it.get("star", False)
+                     pm_badged = badge_star(pm, starred)
+                     self.library_view.add_item(it["name"], pm_badged, starred)
+
+    def sort_items(self, criteria):
+        reverse = False
+        key = None
+        if criteria == "Date (Newest)":
+            key = lambda x: os.path.getmtime(x["name"]) if os.path.exists(x["name"]) else 0
+            reverse = True
+        elif criteria == "Date (Oldest)":
+            key = lambda x: os.path.getmtime(x["name"]) if os.path.exists(x["name"]) else 0
+            reverse = False
+        elif criteria == "Star":
+            key = lambda x: x.get("star", False)
+            reverse = True
+        else: # Name
+            key = lambda x: os.path.basename(x["name"]).lower()
+            
+        self.items.sort(key=key, reverse=reverse)
+        
+        self.rebuild_filmstrip()
+        self._refresh_library_grid()
+        if self.film.count() > 0:
+            self.film.setCurrentRow(0)
+            if self.stack.currentIndex() == 0:
+                 pass # Library grid selection logic if needed
+
 
 if __name__=="__main__":
     # macOS HiDPI / Retina: rely on Qt6 auto scaling, just adjust rounding and layer usage
