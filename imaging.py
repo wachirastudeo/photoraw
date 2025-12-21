@@ -60,26 +60,38 @@ def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
     if abs(hi) < 1e-6 and abs(sh) < 1e-6 and abs(wh) < 1e-6 and abs(bl) < 1e-6:
         return rgb
     
-    y = clamp01(rgb_to_lum(rgb))
-    out = rgb.copy()
+    y = rgb_to_lum(rgb) # No clamp yet, keep range
     
+    # Shadow/Highlight recovery
     if abs(sh) > 1e-6:
-        w = np.clip(1.0 - (y*2.0), 0, 1)[..., None]
-        out = out * (1 - w) + (out * (1 + 0.8*sh)) * w
-    
+        # Shadows: Focus on 0.0 to 0.5
+        mask = np.clip(1.0 - y*2.0, 0, 1)
+        mask = mask * mask # Smoother falloff
+        # Lift shadows: Linear gain
+        gain = 1.0 + sh * 1.5 # Max 2.5x
+        rgb = rgb * (1 - mask[..., None]) + (rgb * gain) * mask[..., None]
+
     if abs(hi) > 1e-6:
-        # Smoothstep for smoother highlight transition
-        t = np.clip((y*2.0 - 1.0), 0, 1)
-        w = (t * t * (3.0 - 2.0 * t))[..., None]
-        out = out * (1 - w) + (out * (1 - 0.8*hi)) * w
-    
+        # Highlights: Focus on 0.5 to 1.0
+        mask = np.clip(y*2.0 - 1.0, 0, 1)
+        mask = mask * mask # Smoother falloff
+        # Reduce highlights: Gain reduction
+        gain = 1.0 - hi * 0.6 # Max reduce to 40%
+        rgb = rgb * (1 - mask[..., None]) + (rgb * gain) * mask[..., None]
+        
+    # Re-calc luminance after SH for WB adjustments
+    # Whites: Adjust White Point (Extension/Compression)
     if abs(wh) > 1e-6:
-        out = np.minimum(out * (1.0 + wh*0.6), 1.0)
+        # Whites essentially scales the bright parts more
+        # Simple exposure-like behavior is standard for "Whites"
+        rgb = rgb * (1.0 + wh * 0.5)
     
+    # Blacks: Adjust Black Point
     if abs(bl) > 1e-6:
-        out = np.maximum(out + bl*0.4, 0.0)
-    
-    return out
+        # Add offset
+        rgb = rgb + bl * 0.2
+
+    return clamp01(rgb)
 
 def apply_saturation_vibrance(rgb, saturation=0.0, vibrance=0.0):
     gray=rgb.mean(axis=2,keepdims=True)

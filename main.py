@@ -106,7 +106,16 @@ class Main(QMainWindow):
         btnImport = QPushButton("Import"); btnImport.setToolTip("Import Images"); btnImport.clicked.connect(self.import_images)
         btnDelete = QPushButton("Delete"); btnDelete.clicked.connect(self.delete_selected)
         btnStarRow = QPushButton("Star ★"); btnStarRow.setCheckable(False); btnStarRow.clicked.connect(self.toggle_star_selected)
+        
+        # Select All / None (Added here as requested)
+        btnSelAll = QPushButton("All ☑"); btnSelAll.setToolTip("Select All Items")
+        btnSelAll.clicked.connect(lambda: hasattr(self, 'library_view') and self.stack.currentIndex() == 0 and self.library_view.set_all_checked(True))
+        
+        btnSelNone = QPushButton("None ☐"); btnSelNone.setToolTip("Unselect All Items")
+        btnSelNone.clicked.connect(lambda: hasattr(self, 'library_view') and self.stack.currentIndex() == 0 and self.library_view.set_all_checked(False))
+
         row1.addWidget(btnImport); row1.addWidget(btnDelete); row1.addWidget(btnStarRow)
+        row1.addWidget(btnSelAll); row1.addWidget(btnSelNone)
         
         # Sort
         row1.addWidget(QLabel("Sort:"))
@@ -114,8 +123,8 @@ class Main(QMainWindow):
         self.cmbSort.currentTextChanged.connect(self.sort_items)
         row1.addWidget(self.cmbSort)
         
-        # New/Switch Project (Moved to Menu or small icons?) -> Keep simpler buttons
-        btnProj = QPushButton("Switch"); btnProj.clicked.connect(self.switch_project)
+        # New/Switch Project
+        btnProj = QPushButton("Open Project..."); btnProj.clicked.connect(self.switch_project)
         row1.addWidget(btnProj)
 
         row1.addStretch(1) # Spacer
@@ -349,6 +358,8 @@ class Main(QMainWindow):
         
         # Restore images from the loaded project
         self._restore_project_images()
+        # Ensure items are sorted by default (Name)
+        self.sort_items("Name")
         
         # Start in Library Mode if items exist, otherwise stick to current (or Library empty)
         # But wait, helper functions for mode switching need to be defined first? 
@@ -2457,7 +2468,11 @@ class Main(QMainWindow):
             key = lambda x: x.get("star", False)
             reverse = True
         else: # Name
-            key = lambda x: os.path.basename(x["name"]).lower()
+            import re
+            def natural_key(x):
+                text = os.path.basename(x["name"])
+                return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+            key = natural_key
             
         self.items.sort(key=key, reverse=reverse)
         

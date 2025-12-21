@@ -36,16 +36,7 @@ class LibraryView(QWidget):
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._show_context_menu)
         
-        # Selection Toolbar
-        toolbar = QWidget()
-        tb_layout = QHBoxLayout(toolbar)
-        tb_layout.setContentsMargins(10, 0, 10, 5)
-        
-        btn_all = QWidget() # Placeholder if needed, but let's use buttons
-        from PySide6.QtWidgets import QPushButton
-        
         # --- Generate Checkbox Icons for Styling ---
-        # We need absolute paths for QSS
         import os
         from PySide6.QtGui import QPainter, QPen, QColor, QImage, QPainterPath
         
@@ -119,23 +110,7 @@ class LibraryView(QWidget):
                 image: url({url_checked});
             }}
         """)
-
-        self.btnSelectAll = QPushButton("Select All")
-        self.btnSelectAll.clicked.connect(lambda: self.set_all_checked(True))
         
-        self.btnSelectNone = QPushButton("Select None") 
-        self.btnSelectNone.clicked.connect(lambda: self.set_all_checked(False))
-        
-        # Styling buttons slightly smaller
-        btn_style = "QPushButton{padding:4px 10px; font-size:11px;}"
-        self.btnSelectAll.setStyleSheet(btn_style)
-        self.btnSelectNone.setStyleSheet(btn_style)
-        
-        tb_layout.addWidget(self.btnSelectAll)
-        tb_layout.addWidget(self.btnSelectNone)
-        tb_layout.addStretch()
-        
-        layout.addWidget(toolbar)
         layout.addWidget(self.grid)
 
     def add_item(self, name, pixmap, starred=False):
