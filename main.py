@@ -136,7 +136,7 @@ class Main(QMainWindow):
         vc_layout.addWidget(self.btnZoomFit); vc_layout.addWidget(self.btnZoom100); vc_layout.addWidget(self.btnSplit)
         
         vc_layout.addWidget(QLabel("  Filter:"))
-        self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred"])
+        self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred", "Checked"])
         self.filterBox.currentTextChanged.connect(self.apply_filter)
         vc_layout.addWidget(self.filterBox)
 
@@ -178,6 +178,8 @@ class Main(QMainWindow):
         self.library_view = LibraryView()
         self.library_view.sig_open_edit.connect(self._on_library_edit)
         self.library_view.sig_rating_changed.connect(self._on_library_rating)
+        self.library_view.sig_check_changed.connect(self._on_library_check_changed)
+        self.library_view.sig_bulk_check_changed.connect(self._on_library_bulk_check)
         self.stack.addWidget(self.library_view)
         
         # Page 2: Develop View (Container for existing Row 2 + Content)
@@ -659,6 +661,7 @@ class Main(QMainWindow):
         self.catalog[it["name"]] = {
             "settings": it["settings"],
             "star": bool(it.get("star", False)),
+            "checked": bool(it.get("checked", True)),
             "preset": it.get("applied_preset")
         }
         self.catalog["__ui__"] = {
@@ -888,12 +891,14 @@ class Main(QMainWindow):
                 self.items[-1]["star"] = bool(saved.get("star", False))
                 if "preset" in saved:
                     self.items[-1]["applied_preset"] = saved.get("preset")
+                self.items[-1]["checked"] = saved.get("checked", True) # Default Checked
             else:
                 # Register new file in catalog
                 self.catalog[p] = {
                     "settings": DEFAULTS.copy(),
                     "star": False,
-                    "preset": None
+                    "preset": None,
+                    "checked": True # Default Checked
                 }
         
         # Save catalog immediately to persist the file list
@@ -924,6 +929,15 @@ class Main(QMainWindow):
                 # Add to Library View
                 if hasattr(self, 'library_view'):
                     self.library_view.add_item(self.items[idx]["name"], pm_badged, starred)
+                    # Sync check state to UI
+                    is_checked = self.items[idx].get("checked", True)
+                    # add_item defaults to Checked, so if False, uncheck it
+                    if not is_checked:
+                        # Need to find the item we just added. 
+                        # add_item appends.
+                        last_row = self.library_view.grid.count() - 1
+                        if last_row >= 0:
+                            self.library_view.grid.item(last_row).setCheckState(Qt.Unchecked)
             
             if self.current<0 and self.film.count()>0: self.film.setCurrentRow(0)
             self.loaded+=1; self.update_status()
@@ -1001,7 +1015,39 @@ class Main(QMainWindow):
         self.view_filter=text; self.rebuild_filmstrip()
 
     def _pass_filter(self, it)->bool:
-        return True if self.view_filter=="All" else bool(it.get("star",False))
+        # User Requirement: If not ticked (checked), do not show in developer mode (Filmstrip)
+        if not it.get("checked", True): return False
+        
+        # Then apply standard filters
+        if self.view_filter == "All": return True
+        if self.view_filter == "Starred": return bool(it.get("star", False))
+        if self.view_filter == "Checked": return True # Redundant since we check above, but for clarity
+        return True
+
+    def _on_library_check_changed(self, name, checked):
+        # Find item by name
+        it = next((i for i in self.items if i["name"] == name), None)
+        if not it: return
+        
+        it["checked"] = checked
+        
+        # Update Catalog
+        if it["name"] not in self.catalog: self.catalog[it["name"]]={}
+        self.catalog[it["name"]]["checked"] = checked
+        save_catalog(self.catalog, self.project_dir)
+        
+        # Rebuild filmstrip to hide/show
+        self.rebuild_filmstrip()
+
+    def _on_library_bulk_check(self, checked):
+        # Update ALL items
+        for it in self.items:
+            it["checked"] = checked
+            if it["name"] not in self.catalog: self.catalog[it["name"]]={}
+            self.catalog[it["name"]]["checked"] = checked
+        
+        save_catalog(self.catalog, self.project_dir)
+        self.rebuild_filmstrip()
 
     def rebuild_filmstrip(self):
         selected=[self.film.item(i.row()).data(Qt.UserRole) for i in self.film.selectedIndexes()]
