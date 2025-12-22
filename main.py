@@ -189,6 +189,8 @@ class Main(QMainWindow):
         self.library_view.sig_rating_changed.connect(self._on_library_rating)
         self.library_view.sig_check_changed.connect(self._on_library_check_changed)
         self.library_view.sig_bulk_check_changed.connect(self._on_library_bulk_check)
+        self.library_view.sig_copy_settings.connect(self.copy_settings)
+        self.library_view.sig_paste_settings.connect(self.paste_settings)
         self.stack.addWidget(self.library_view)
         
         # Page 2: Develop View (Container for existing Row 2 + Content)
@@ -1500,27 +1502,75 @@ class Main(QMainWindow):
         self.update_status("Redo")
 
     # ------- copy / paste settings -------
+    # ------- copy / paste settings -------
     def copy_settings(self):
-        if self.current < 0:
+        # Determine source
+        idx = self.current
+        # If in Library View (Stack 0), try to get selection there
+        if self.stack.currentIndex() == 0 and hasattr(self, "library_view"):
+            sel = self.library_view.grid.selectedIndexes()
+            if sel: idx = sel[0].row()
+            
+        if idx < 0 or idx >= len(self.items):
             QMessageBox.information(self,"Info","Select an image to copy settings"); return
-        it = self.items[self.current]
+            
+        it = self.items[idx]
         self.copied_settings = dict(it["settings"])
-        self.update_status("Settings copied")
+        self.update_status(f"Copied settings from {os.path.basename(it['name'])}")
 
     def paste_settings(self):
-        if self.current < 0:
-            QMessageBox.information(self,"Info","Select an image to paste settings"); return
-        if not self.copied_settings:
-            QMessageBox.information(self,"Info","No copied settings"); return
-        it = self.items[self.current]
-        self._push_undo(it)
-        self.redo_stack.get(it["name"], []).clear()
-        it["settings"] = {**DEFAULTS, **self.copied_settings}
-        it["applied_preset"] = None
-        self._persist_current_item()
-        self.load_settings_to_ui()
-        self._kick_preview_thread(force=True)
-        self.update_status("Pasted settings")
+        if not hasattr(self, "copied_settings") or not self.copied_settings:
+            QMessageBox.information(self,"Info","No settings copied"); return
+
+        targets = []
+        if self.stack.currentIndex() == 0 and hasattr(self, "library_view"): # Library View
+            sel = self.library_view.grid.selectedIndexes()
+            targets = [r.row() for r in sel]
+        else: # Develop View
+            if self.current >= 0:
+                targets = [self.current]
+        
+        if not targets:
+            QMessageBox.information(self,"Info","Select images to paste settings"); return
+            
+        count = 0
+        from imaging import DEFAULTS
+        for idx in targets:
+            if idx < 0 or idx >= len(self.items): continue
+            it = self.items[idx]
+            
+            # Update settings
+            it["settings"] = {**DEFAULTS, **self.copied_settings}
+            it["applied_preset"] = None
+            
+            # Persist
+            # Inline saving logic similar to _save_item_metadata/persist_current
+            try:
+                base = os.path.splitext(it["name"])[0]
+                json_path = base + ".json"
+                out = {}
+                out["settings"] = it["settings"]
+                out["star"] = it.get("star", False)
+                if it.get("applied_preset"):
+                    out["preset"] = it["applied_preset"]
+                import json
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(out, f, indent=2)
+            except Exception as e:
+                print(f"Error saving {it['name']}: {e}")
+                
+            # Update running UI if it's the current item and we are in develop mode
+            if idx == self.current and self.stack.currentIndex() == 1:
+                self.load_settings_to_ui()
+                self._kick_preview_thread(force=True)
+            
+            # If in library view, we should technically update thumbnails if they change drastically,
+            # but for performance we might skip re-rendering thumb.
+            # However, we should emit check/star change if those were copied (settings only copies processing).
+            
+            count += 1
+            
+        self.update_status(f"Pasted settings to {count} images")
 
     def delete_selected(self):
         names_to_delete = set()
@@ -1618,7 +1668,8 @@ class Main(QMainWindow):
                              is_zoomed=self.is_zoomed, zoom_point=self.zoom_point_norm,
                              preview_size=self.preview.size(),
                              processed_cache=cache,
-                             low_spec=self.chk_low_spec.isChecked() if hasattr(self, "chk_low_spec") else False)
+                             low_spec=self.chk_low_spec.isChecked() if hasattr(self, "chk_low_spec") else False,
+                             panning=self._is_panning if hasattr(self, "_is_panning") else False)
         worker.signals.ready.connect(self._show_preview_pix)
         if self.live_dragging:
             self.live_inflight = True
@@ -1658,8 +1709,10 @@ class Main(QMainWindow):
         self._kick_preview_thread(force=True)
 
     def _schedule_pan_preview_update(self):
-        # restart timer so continuous drags coalesce into ~60fps updates
-        self.pan_update_timer.start(16)
+        # Throttle updates to ~60fps (16ms)
+        # Only start timer if not already active to avoid resetting the interval
+        if not self.pan_update_timer.isActive():
+            self.pan_update_timer.start(16)
 
     def _show_preview_pix(self, arr):
         from ui_helpers import qimage_from_u8, badge_star
@@ -1729,9 +1782,9 @@ class Main(QMainWindow):
                 if not self._is_panning:
                     self.zoom_fit()
                 self.preview.setCursor(Qt.OpenHandCursor)
-                if self._is_panning and self.pan_update_timer.isActive():
+                
+                if self.pan_update_timer.isActive():
                     self.pan_update_timer.stop()
-                    self._kick_preview_thread(force=True)
             else:  # Was not zoomed, so this click means "zoom in"
                 self.is_zoomed = True
                 pm_rect = self.preview.pixmap().rect()
@@ -1746,8 +1799,14 @@ class Main(QMainWindow):
                 self._kick_preview_thread(force=True)
 
             # Always reset panning state on release
+            was_panning = self._is_panning
             self.pan_origin = None
             self._is_panning = False
+            
+            # If we were panning, trigger one last update with panning=False to restore high quality
+            if was_panning and self.is_zoomed:
+                self._kick_preview_thread(force=True)
+                
             return True
 
         # --- Mouse Leave: Clear cursor ---

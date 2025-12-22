@@ -11,6 +11,9 @@ class LibraryView(QWidget):
     sig_check_changed = Signal(str, bool)
     # Signal emitted for bulk updates (is_checked_all)
     sig_bulk_check_changed = Signal(bool)
+    # Signals for Copy/Paste Settings
+    sig_copy_settings = Signal()
+    sig_paste_settings = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -182,6 +185,16 @@ class LibraryView(QWidget):
 
         act_check = menu.addAction("Toggle Check")
         act_check.triggered.connect(self._toggle_check_selected)
+        
+        menu.addSeparator()
+        
+        act_copy = menu.addAction("Copy Settings")
+        act_copy.triggered.connect(self.sig_copy_settings.emit)
+        
+        act_paste = menu.addAction("Paste Settings")
+        act_paste.triggered.connect(self.sig_paste_settings.emit)
+        
+        menu.addSeparator()
         
         act_edit = menu.addAction("Open in Develop")
         act_edit.triggered.connect(lambda: self.sig_open_edit.emit(self.grid.currentRow()))

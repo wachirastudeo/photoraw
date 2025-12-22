@@ -13,7 +13,7 @@ class DecodeWorker(QRunnable):
         self.path=path; self.thumb_w=thumb_w; self.thumb_h=thumb_h
         self.signals=DecodeSignals()
         # Prevent the QRunnable from being auto-deleted before signals are emitted
-        self.setAutoDelete(False)
+        # self.setAutoDelete(False)
     def run(self):
         try:
             full, thumb = decode_image(self.path, (self.thumb_w, self.thumb_h))
@@ -28,7 +28,7 @@ class PreviewWorker(QRunnable):
     _mutex = QMutex()
     _latest_id = 0
 
-    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None, is_zoomed=False, zoom_point=None, preview_size=None, processed_cache=None, low_spec=False):
+    def __init__(self, full_rgb, adj, long_edge, sharpen_amt, mode, req_id, live=False, base_override=None, is_zoomed=False, zoom_point=None, preview_size=None, processed_cache=None, low_spec=False, **kwargs):
         super().__init__()
         self.full_rgb=full_rgb
         self.adj=adj
@@ -41,11 +41,14 @@ class PreviewWorker(QRunnable):
         self.is_zoomed = is_zoomed
         self.zoom_point = zoom_point
         self.preview_size = preview_size
+        self.preview_size = preview_size
         self.processed_cache = processed_cache or {}
         self.low_spec = low_spec
+        self.panning = kwargs.get("panning", False)
         self.signals=PreviewSignals()
         # Prevent the QRunnable from being auto-deleted before signals are emitted
-        self.setAutoDelete(False)
+        # Prevent the QRunnable from being auto-deleted before signals are emitted
+        # self.setAutoDelete(False)
 
     @classmethod
     def next_id(cls):
@@ -64,6 +67,31 @@ class PreviewWorker(QRunnable):
             return arr
         s = long_edge / float(cur)
         nw, nh = int(w * s), int(h * s)
+        
+        # Handle 16-bit
+        if arr.dtype == np.uint16:
+             # PIL has limited 16-bit RGB support.
+             # Plan B: Resize per channel or just simple decimation if use_fast is on.
+             # For high quality, we convert to float, resize, convert back? Slow.
+             # For now, let's just use OpenCV-like resizing via scipy or just PIL with mode workaround?
+             # Easiest: Convert to float, resize using PIL mode 'F' per channel? No too complex.
+             # Let's simple slice if Fast, or PIL I;16 per channel.
+             
+             if use_fast:
+                 # Nearest neighbor via slicing
+                 step = int(1/s)
+                 if step < 1: step = 1
+                 return arr[::step, ::step].copy()
+            
+             # High quality 16-bit resize: Process per channel using PIL "I;16"
+             chans = []
+             for c in range(3):
+                 im = Image.fromarray(arr[..., c], mode="I;16")
+                 im = im.resize((nw, nh), Image.LANCZOS)
+                 chans.append(np.array(im, dtype=np.uint16))
+             
+             return np.dstack(chans)
+
         # Use faster resampling for live preview, higher quality for final
         resample = Image.NEAREST if use_fast else Image.LANCZOS
         return np.array(Image.fromarray(arr).resize((nw, nh), resample), dtype=np.uint8)
@@ -119,7 +147,9 @@ class PreviewWorker(QRunnable):
             patch_adj["vignette"] = 0.0
             
             # Process color/effects on the small patch (Fast!)
-            out = process_image_fast(raw_patch, patch_adj, fast_mode=False)
+            # Enable fast mode if live dragging OR panning
+            is_fast = self.live or self.panning
+            out = process_image_fast(raw_patch, patch_adj, fast_mode=is_fast)
             
             # Apply preview sharpening
             out = preview_sharpen(out, self.sharpen_amt)
@@ -195,7 +225,8 @@ class ExportWorker(QRunnable):
         self.items=items; self.out_dir=out_dir; self.opts=opts
         self.signals=ExportSignals()
         # Prevent the QRunnable from being auto-deleted before signals are emitted
-        self.setAutoDelete(False)
+        # Prevent the QRunnable from being auto-deleted before signals are emitted
+        # self.setAutoDelete(False)
 
     def _resize_long_edge(self, arr, long_edge):
         if not long_edge or long_edge<=0: return arr

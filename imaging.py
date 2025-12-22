@@ -58,40 +58,54 @@ def apply_white_balance(rgb, temperature=0.0, tint=0.0):
 def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
     # Skip if no adjustments
     if abs(hi) < 1e-6 and abs(sh) < 1e-6 and abs(wh) < 1e-6 and abs(bl) < 1e-6:
+        # If no explicit tone mapping, we still need to compress HDR values > 1.0
+        # Simple soft-clip for values > 1.0 (knee)
+        if np.any(rgb > 1.0):
+            return np.where(rgb > 1.0, 1.0 + np.log(rgb), rgb) # basic reinhard-ish
         return rgb
     
-    y = rgb_to_lum(rgb) # No clamp yet, keep range
+    y = rgb_to_lum(rgb)
     
-    # Shadow/Highlight recovery
+    # Better Shadow Recovery (Digging)
     if abs(sh) > 1e-6:
-        # Shadows: Focus on 0.0 to 0.5
-        mask = np.clip(1.0 - y*2.0, 0, 1)
-        mask = mask * mask # Smoother falloff
-        # Lift shadows: Linear gain
-        gain = 1.0 + sh * 1.5 # Max 2.5x
-        rgb = rgb * (1 - mask[..., None]) + (rgb * gain) * mask[..., None]
-
-    if abs(hi) > 1e-6:
-        # Highlights: Focus on 0.5 to 1.0
-        mask = np.clip(y*2.0 - 1.0, 0, 1)
-        mask = mask * mask # Smoother falloff
-        # Reduce highlights: Gain reduction
-        gain = 1.0 - hi * 0.6 # Max reduce to 40%
-        rgb = rgb * (1 - mask[..., None]) + (rgb * gain) * mask[..., None]
+        # Create mask focused deeply on darks
+        # Only affect pixels < 0.2 mostly, taper to 0.5
+        shadow_mask = np.clip((0.5 - y) * 2.0, 0, 1) ** 2
         
-    # Re-calc luminance after SH for WB adjustments
-    # Whites: Adjust White Point (Extension/Compression)
+        # Logarithmic lift for natural digging
+        # If sh > 0, we want to multiply.
+        lift = 1.0 + sh * 4.0 # Stronger range (up to 5x gain in deep shadows)
+        
+        # Apply more gain to darker areas
+        rgb = rgb * (1.0 + (lift - 1.0) * shadow_mask[..., None])
+
+    # Highlight Compression (HDR Pullback)
+    if abs(hi) > 1e-6:
+        # Mask for bright areas
+        # Soft transition start at 0.7
+        hi_mask = np.clip((y - 0.5) * 2.0, 0, 1) ** 2
+        
+        # Compression factor
+        # compress = 1.0 / (1.0 + hi * 2.0)
+        # rgb = rgb * (1.0 - hi_mask[..., None]) + (rgb * compress) * hi_mask[..., None]
+        
+        # New method: Compress HDR highlights (>1.0) back to 1.0 range
+        # If hi=1.0, we aggressively map >1.0 to near 1.0
+        if hi > 0:
+            scale = 1.0 + hi * 3.0
+            # RGB / Scale for highlights
+            target = rgb / scale
+            rgb = rgb * (1.0 - hi_mask[..., None]) + target * hi_mask[..., None]
+
+    # Whites (Point shift)
     if abs(wh) > 1e-6:
-        # Whites essentially scales the bright parts more
-        # Simple exposure-like behavior is standard for "Whites"
         rgb = rgb * (1.0 + wh * 0.5)
     
-    # Blacks: Adjust Black Point
+    # Blacks (Offset)
     if abs(bl) > 1e-6:
-        # Add offset
-        rgb = rgb + bl * 0.2
+        rgb = rgb + bl * 0.1
 
-    return clamp01(rgb)
+    return rgb # Return float, let later stages clamp
 
 def apply_saturation_vibrance(rgb, saturation=0.0, vibrance=0.0):
     gray=rgb.mean(axis=2,keepdims=True)
@@ -378,19 +392,25 @@ def apply_hsl_mixer(rgb, adj):
     return hsv_to_rgb(hn,sn,vn)
 
 def pipeline(rgb01, adj, fast_mode=False):
-    # Apply exposure first and clamp (critical - can significantly exceed [0,1])
-    x = clamp01(rgb01 * (2.0**adj["exposure"]))
+    # Apply exposure first
+    # [CHANGED] Do NOT clamp yet. Allow values > 1.0 for HDR highlights.
+    x = rgb01 * (2.0**adj["exposure"])
     
-    # Pixel-wise operations (safe, no need to clamp each)
+    # Pixel-wise operations
     x = apply_white_balance(x, adj["temperature"], adj["tint"])
+    
+    # Tone mapping (Highlights/Shadows) handles the HDR compression
     x = apply_tone_regions(x, adj["highlights"], adj["shadows"], adj["whites"], adj["blacks"])
+    
+    # NOW we can safely clamp mid-pipeline if needed, but keeping float is better
+    
     x = apply_dehaze(x, adj["dehaze"])
     
-    # Denoise if not in fast mode (already has internal clamping)
+    # Denoise if not in fast mode
     if not fast_mode:
         x = apply_denoise(x, adj["denoise"])
     else:
-        # Clamp once after tone adjustments if skipping denoise
+        # Clamp once if skipping denoise to ensure safe range for next steps
         x = clamp01(x)
     
     # Color adjustments (safe range)
@@ -399,17 +419,20 @@ def pipeline(rgb01, adj, fast_mode=False):
     x = apply_curve_lut(x, adj.get("curve_lut"))
     x = apply_mid_contrast(x, adj["mid_contrast"])
     
-    # Convolution-based effects (can exceed range slightly)
+    # Convolution-based effects
     x = clamp01(apply_clarity(x, adj["clarity"]))
     x = apply_texture(x, adj["texture"])
     
-    # HSL mixer (already returns clamped values)
+    # HSL mixer
     x = apply_hsl_mixer(x, adj)
     
     # Final effects
     x = apply_vignette(x, adj["vignette"])
-    x = apply_defringe(x, adj.get("defringe", 0.0))
-    x = apply_film_grain(x, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5))
+    
+    # In fast mode, skip heavy final effects
+    if not fast_mode:
+        x = apply_defringe(x, adj.get("defringe", 0.0))
+        x = apply_film_grain(x, adj.get("grain_amount", 0.0), adj.get("grain_size", 0.5), adj.get("grain_roughness", 0.5))
     
     # Final clamp to ensure [0,1] range
     return clamp01(x)
@@ -418,14 +441,25 @@ def process_image_fast(base_u8, adj, fast_mode=False):
     """
     Wrapper to use Rust extension if available.
     Uses hybrid approach: Rust for pixel-wise ops, Python for convolutions.
-    base_u8: uint8 numpy array (H, W, 3)
+    base_u8: uint8 OR uint16 numpy array (H, W, 3)
     adj: dict of settings
     """
-    if ninlab_core:
+    is_16bit = (base_u8.dtype == np.uint16)
+    
+    if ninlab_core and not is_16bit:
         # Hybrid approach: Rust for pixel-wise, Python for convolutions
         try:
             # Rust expects HashMap<String, f32>. Filter out non-float values (like curve_lut which is list/None).
             rust_settings = {k: float(v) for k, v in adj.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            
+            # OPTIMIZATION: In fast mode, disable heavy effects (Denoise, Grain, Defringe)
+            if fast_mode:
+                rust_settings["denoise"] = 0.0
+                rust_settings["grain_amount"] = 0.0
+                rust_settings["defringe"] = 0.0
+                # Clarity/Texture handled separate below (Python side), but good to zero them in Rust if eventually moved there
+                rust_settings["clarity"] = 0.0
+                rust_settings["texture"] = 0.0
             
             # Handle curve_lut separately
             lut = adj.get("curve_lut")
@@ -447,7 +481,8 @@ def process_image_fast(base_u8, adj, fast_mode=False):
                 abs(adj.get("texture", 0.0)) > 1e-6
             )
             
-            if needs_convolution:
+            # In fast mode, skip convolution entirely
+            if needs_convolution and not fast_mode:
                 # Convert to float for convolution operations
                 result_f = result.astype(np.float32) / 255.0
                 
@@ -458,10 +493,6 @@ def process_image_fast(base_u8, adj, fast_mode=False):
                 if abs(adj.get("texture", 0.0)) > 1e-6:
                     result_f = apply_texture(result_f, adj["texture"])
                 
-                # Defringe is now handled in Rust!
-                # Denoise is now handled in Rust!
-                # Film Grain is now handled in Rust!
-                
                 # Convert back to uint8
                 result = (np.clip(result_f, 0, 1) * 255.0 + 0.5).astype(np.uint8)
             
@@ -471,8 +502,13 @@ def process_image_fast(base_u8, adj, fast_mode=False):
             # Fallback to pure Python
             pass
             
-    # Fallback to NumPy
-    src01 = base_u8.astype(np.float32)/255.0
+    # Fallback/16-bit Pipeline
+    if is_16bit:
+        # High precision pipeline
+        src01 = base_u8.astype(np.float32) / 65535.0
+    else:
+        src01 = base_u8.astype(np.float32) / 255.0
+        
     out01 = pipeline(src01, adj, fast_mode=fast_mode)
     return (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
 
@@ -528,11 +564,26 @@ def decode_image(path, thumb_size=(72,48)):
     elif rawpy is not None:
         with rawpy.imread(path) as raw:
             # Enable auto brightness to match camera JPEG look
-            full=raw.postprocess(use_camera_wb=True,no_auto_bright=False,output_bps=8)
+            # [CHANGED] Use 16-bit linear output for better shadow recovery ("digging")
+            # no_auto_bright=True prevents early gamma clipping
+            full=raw.postprocess(
+                use_camera_wb=True,
+                no_auto_bright=True,
+                bright=1.0, # minimal gain
+                user_sat=None,
+                output_bps=16
+            )
     else:
         raise RuntimeError("RAW file needs rawpy. Install: pip install rawpy")
 
-    thumb=Image.fromarray(full).copy()
+    # Generate 8-bit thumbnail
+    if full.dtype == np.uint16:
+        # Simple compression for thumbnail
+        thumb_arr = (full >> 8).astype(np.uint8)
+    else:
+        thumb_arr = full
+        
+    thumb=Image.fromarray(thumb_arr).copy()
     thumb.thumbnail(thumb_size, Image.BILINEAR)
     thumb=np.array(thumb,dtype=np.uint8)
     return full, thumb
