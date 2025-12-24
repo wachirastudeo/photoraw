@@ -32,6 +32,7 @@ DEFAULTS = {
     **{f"s_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     **{f"l_{c}":0.0 for c in ["red","orange","yellow","green","aqua","blue","purple","magenta"]},
     # transforms
+    "angle": 0.0,           # หมุนแบบละเอียด (-10 ถึง +10 องศา สำหรับปรับภาพเอียง)
     "rotate": 0,            # หมุนองศา (0/90/180/270 แนะนำ)
     "flip_h": False,        # กลับซ้าย-ขวา
     "crop": None,           # dict {"x":..,"y":..,"w":..,"h":..} normalized [0..1] หรือ None
@@ -55,13 +56,57 @@ def apply_white_balance(rgb, temperature=0.0, tint=0.0):
     rgb[..., 2] *= b
     return rgb
 
+def auto_white_balance(rgb):
+    """
+    Calculate auto white balance corrections using Gray World algorithm.
+    Returns (temperature, tint) adjustment values.
+    """
+    # Use middle 50% of luminance range to avoid clipped areas
+    lum = rgb_to_lum(rgb)
+    mask = (lum > 0.25) & (lum < 0.75)
+    
+    if not np.any(mask):
+        # Fallback to all pixels if mask is empty
+        mask = np.ones(lum.shape, dtype=bool)
+    
+    # Calculate average RGB in the valid range
+    r_avg = np.mean(rgb[..., 0][mask])
+    g_avg = np.mean(rgb[..., 1][mask])
+    b_avg = np.mean(rgb[..., 2][mask])
+    
+    # Gray world: assume average should be neutral gray
+    avg = (r_avg + g_avg + b_avg) / 3.0
+    
+    if avg < 1e-6:
+        return 0.0, 0.0
+    
+    # Calculate how much to adjust each channel
+    r_scale = avg / (r_avg + 1e-6)
+    b_scale = avg / (b_avg + 1e-6)
+    g_scale = avg / (g_avg + 1e-6)
+    
+    # Convert scale factors to temperature/tint
+    # Temperature affects R-B balance
+    # Tint affects G-M balance
+    
+    # Temperature: positive = warmer (more red), negative = cooler (more blue)
+    # We need to map r_scale/b_scale to temperature range
+    temp_raw = (r_scale - b_scale) / 2.0
+    temperature = np.clip(temp_raw * 0.5, -1.0, 1.0)
+    
+    # Tint: positive = more green, negative = more magenta
+    tint_raw = (g_scale - (r_scale + b_scale) / 2.0)
+    tint = np.clip(tint_raw * 0.5, -1.0, 1.0)
+    
+    return float(temperature), float(tint)
+
 def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
     # Skip if no adjustments
     if abs(hi) < 1e-6 and abs(sh) < 1e-6 and abs(wh) < 1e-6 and abs(bl) < 1e-6:
         # If no explicit tone mapping, we still need to compress HDR values > 1.0
         # Simple soft-clip for values > 1.0 (knee)
         if np.any(rgb > 1.0):
-            return np.where(rgb > 1.0, 1.0 + np.log(rgb), rgb) # basic reinhard-ish
+            return np.where(rgb > 1.0, 1.0 + np.log(np.maximum(rgb, 1e-10)), rgb) # basic reinhard-ish
         return rgb
     
     y = rgb_to_lum(rgb)
@@ -515,7 +560,15 @@ def process_image_fast(base_u8, adj, fast_mode=False):
 def apply_transforms(arr_u8, adj):
     """ใช้ทรานส์ฟอร์ม (หมุน/กลับ/ครอป) หลังแต่งภาพเสร็จ"""
     out = arr_u8
-    # rotate (รองรับ 0/90/180/270 ได้ทันที, องศาอื่นจะใช้ PIL)
+    
+    # 1. Apply fine angle adjustment first (for straightening tilted images)
+    angle = float(adj.get("angle", 0.0))
+    if abs(angle) > 1e-6:
+        # Positive angle = counterclockwise rotation
+        # Use expand=True to show the full rotated image without cropping
+        out = np.array(Image.fromarray(out).rotate(-angle, resample=Image.BICUBIC, expand=True))
+    
+    # 2. Then apply 90° rotation (รองรับ 0/90/180/270 ได้ทันที, องศาอื่นจะใช้ PIL)
     rot = int(adj.get("rotate", 0)) % 360
     if rot in (90, 180, 270):
         k = rot // 90
@@ -557,42 +610,321 @@ def preview_sharpen(arr_u8, amount):
     return (out*255.0+0.5).astype(np.uint8)
 
 def decode_image(path, thumb_size=(72,48)):
-    ext=os.path.splitext(path)[1].lower()
-    if ext in (".jpg",".jpeg",".png",".tif",".tiff"):
-        img=Image.open(path).convert("RGB")
-        full=np.array(img,dtype=np.uint8)
-    elif rawpy is not None:
-        with rawpy.imread(path) as raw:
-            # Enable auto brightness to match camera JPEG look
-            # [CHANGED] Use 16-bit linear output for better shadow recovery ("digging")
-            # no_auto_bright=True prevents early gamma clipping
-            full=raw.postprocess(
-                use_camera_wb=True,
-                no_auto_bright=True,
-                bright=1.0, # minimal gain
-                user_sat=None,
-                output_bps=16
-            )
-    else:
-        raise RuntimeError("RAW file needs rawpy. Install: pip install rawpy")
+    print(f"📂 decode_image called for: {path}")
+    
+    # Try loading from cache first
+    try:
+        from cache_manager import load_from_cache, save_to_cache
+        cached = load_from_cache(path)
+        if cached is not None:
+            # Cache hit!
+            print(f"  ✅ Loaded from cache")
+            return cached['full'], cached['thumb']
+        else:
+            print(f"  ⚠️  Cache miss - will decode")
+    except Exception as e:
+        # Cache system failed, continue with normal decoding
+        print(f"  ⚠️  Cache error: {e}")
+        pass
+    
+    # MASTER TRY-EXCEPT: Catch all errors and return error image
+    try:
+        # Cache miss - proceed with decoding
+        ext=os.path.splitext(path)[1].lower()
+        print(f"  📄 File extension: {ext}")
+        if ext in (".jpg",".jpeg",".png",".tif",".tiff"):
+            try:
+                img=Image.open(path)
+                
+                # Auto-rotate based on EXIF orientation
+                from PIL import ImageOps
+                img = ImageOps.exif_transpose(img)
+                
+                img = img.convert("RGB")
+                full=np.array(img,dtype=np.uint8)
+            except Exception as e:
+                print(f"Failed to open {ext} file: {e}")
+                err_img = create_error_image(thumb_size, f"Failed to open {ext.upper()}:\n{str(e)}")
+                return err_img, err_img
+        elif rawpy is not None:
+            # Special handling for Canon CR3 to avoid LibRaw errors and improve performance
+            if ext == ".cr3":
+                print(f"Attempting fast preview extraction for {path}...")
+                full = None
+                
+                # Strategy 1: Smart Binary Scan (PRVW atom / JPEG)
+                try:
+                    import mmap
+                    import struct
+                    from io import BytesIO
+                    
+                    with open(path, 'rb') as f:
+                        # Use mmap for zero-copy searching (much faster than reading 25MB)
+                        # 0 means map the whole file
+                        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                            
+                            # Search for PRVW atom (Canon Preview)
+                            prvw_idx = mm.find(b'PRVW')
+                            
+                            if prvw_idx != -1:
+                                # 1. Parsing PRVW Box Size (Standard 32-bit Box)
+                                # Size is the 4 bytes BEFORE 'PRVW'
+                                if prvw_idx >= 4:
+                                    size_val = struct.unpack('>I', mm[prvw_idx-4:prvw_idx])[0]
+                                    
+                                    # Safety check on size
+                                    if 200 < size_val < 50_000_000:
+                                        # Extract ONLY the preview box data
+                                        start_box = prvw_idx - 4
+                                        end_box = start_box + size_val
+                                        
+                                        # Ensure we don't go out of bounds
+                                        if end_box <= mm.size():
+                                            box_data = mm[start_box:end_box]
+                                            
+                                            # Now search for JPEG inside this small buffer
+                                            jpg_start = box_data.find(b'\xff\xd8')
+                                            if jpg_start != -1:
+                                                stream = BytesIO(box_data[jpg_start:])
+                                                img = Image.open(stream)
+                                                if img.width > 320:
+                                                     best_img = img
+            
+                            # Fallback: If no PRVW or parsing failed, do a Deep Scan
+                            if best_img is None:
+                                limit = min(mm.size(), 100 * 1024 * 1024)
+                                search_area = mm[:limit] 
+                                start = 0
+                                
+                                for _ in range(50):
+                                    idx = search_area.find(b'\xff\xd8', start)
+                                    if idx == -1: break
+                                    
+                                    try:
+                                        stream = BytesIO(search_area[idx:])
+                                        img = Image.open(stream)
+                                        
+                                        if img.width > 160:
+                                             pixels = img.width * img.height
+                                             
+                                             if best_img is None:
+                                                 best_img = img
+                                             else:
+                                                 current_pixels = best_img.width * best_img.height
+                                                 if pixels > current_pixels:
+                                                     best_img = img
+                                             
+                                             if best_img.width * best_img.height > 2000000:
+                                                 break
+                                    except:
+                                        pass
+                                        
+                                    start = idx + 2
+                        
+                        if best_img:
+                            if best_img.mode != "RGB":
+                                best_img = best_img.convert("RGB")
+                                
+                            MAX_PREVIEW_SIZE = 6000
+                            if best_img.width > MAX_PREVIEW_SIZE or best_img.height > MAX_PREVIEW_SIZE:
+                                best_img.thumbnail((MAX_PREVIEW_SIZE, MAX_PREVIEW_SIZE), Image.LANCZOS)
+                                
+                            full = np.array(best_img, dtype=np.uint8)
+                            
+                except Exception as e_scan:
+                    print(f"Binary scan failed: {e_scan}")
 
-    # Generate 8-bit thumbnail
-    if full.dtype == np.uint16:
-        # Simple compression for thumbnail
-        thumb_arr = (full >> 8).astype(np.uint8)
-    else:
-        thumb_arr = full
+                # Strategy 2: ExifTool (If available)
+                if full is None:
+                    try:
+                        import subprocess
+                        for tag in ['-PreviewImage', '-JpgFromRaw', '-ThumbnailImage']:
+                            try:
+                                res = subprocess.run(['exiftool', '-b', tag, str(path)], 
+                                                  capture_output=True, check=True)
+                                if res.stdout and res.stdout.startswith(b'\xff\xd8'):
+                                    from io import BytesIO
+                                    img = Image.open(BytesIO(res.stdout)).convert("RGB")
+                                    MAX_PREVIEW_SIZE = 6000
+                                    if img.width > MAX_PREVIEW_SIZE or img.height > MAX_PREVIEW_SIZE:
+                                        img.thumbnail((MAX_PREVIEW_SIZE, MAX_PREVIEW_SIZE), Image.LANCZOS)
+                                    full = np.array(img, dtype=np.uint8)
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+
+                # If preview extraction failed, try rawpy as last resort
+                if full is None:
+                    try:
+                        with rawpy.imread(path) as raw:
+                             full=raw.postprocess(
+                                use_camera_wb=True,
+                                no_auto_bright=False,
+                                bright=1.0,
+                                user_sat=None,
+                                output_bps=16
+                            )
+                        
+                        # Auto-rotate based on EXIF orientation
+                        # Read orientation from file using ExifTool
+                        try:
+                            import subprocess
+                            import json
+                            
+                            # Find exiftool
+                            exiftool_path = None
+                            possible_locations = [
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exiftool.exe'),
+                                os.path.join(os.getcwd(), 'exiftool.exe'),
+                                'exiftool.exe',
+                            ]
+                            for loc in possible_locations:
+                                if os.path.isfile(loc):
+                                    exiftool_path = loc
+                                    break
+                            
+                            if exiftool_path:
+                                result = subprocess.run(
+                                    [exiftool_path, '-Orientation', '-j', str(path)],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=2
+                                )
+                                
+                                if result.returncode == 0 and result.stdout:
+                                    data = json.loads(result.stdout)[0]
+                                    orientation = data.get('Orientation', '')
+                                    
+                                    # Rotate based on orientation
+                                    if 'Rotate 90 CW' in orientation or orientation == 6:
+                                        full = np.rot90(full, k=-1)
+                                        print(f"  🔄 Rotated 90° CW")
+                                    elif 'Rotate 270 CW' in orientation or orientation == 8:
+                                        full = np.rot90(full, k=1)
+                                        print(f"  🔄 Rotated 270° CW (90° CCW)")
+                                    elif 'Rotate 180' in orientation or orientation == 3:
+                                        full = np.rot90(full, k=2)
+                                        print(f"  🔄 Rotated 180°")
+                        except Exception as e:
+                            print(f"  ⚠️  Could not apply rotation: {e}")
+                            
+                    except Exception as e:
+                        print(f"CR3 decode failed: {e}")
+                        err_img = create_error_image(thumb_size, f"CR3 Error:\n{str(e)}")
+                        return err_img, err_img
+
+            else:
+                # Normal handling for other RAWs (ARW, NEF, etc)
+                try:
+                    with rawpy.imread(path) as raw:
+                        full=raw.postprocess(
+                            use_camera_wb=True,
+                            no_auto_bright=False,
+                            bright=1.0,
+                            user_sat=None,
+                            output_bps=16
+                        )
+                    
+                    # Auto-rotate based on EXIF orientation
+                    # Read orientation from file using ExifTool
+                    try:
+                        import subprocess
+                        import json
+                        
+                        # Find exiftool
+                        exiftool_path = None
+                        possible_locations = [
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exiftool.exe'),
+                            os.path.join(os.getcwd(), 'exiftool.exe'),
+                            'exiftool.exe',
+                        ]
+                        for loc in possible_locations:
+                            if os.path.isfile(loc):
+                                exiftool_path = loc
+                                break
+                        
+                        if exiftool_path:
+                            result = subprocess.run(
+                                [exiftool_path, '-Orientation', '-j', str(path)],
+                                capture_output=True,
+                                text=True,
+                                timeout=2
+                            )
+                            
+                            if result.returncode == 0 and result.stdout:
+                                data = json.loads(result.stdout)[0]
+                                orientation = data.get('Orientation', '')
+                                
+                                # Rotate based on orientation
+                                if 'Rotate 90 CW' in orientation or orientation == 6:
+                                    full = np.rot90(full, k=-1)
+                                    print(f"  🔄 Rotated 90° CW")
+                                elif 'Rotate 270 CW' in orientation or orientation == 8:
+                                    full = np.rot90(full, k=1)
+                                    print(f"  🔄 Rotated 270° CW (90° CCW)")
+                                elif 'Rotate 180' in orientation or orientation == 3:
+                                    full = np.rot90(full, k=2)
+                                    print(f"  🔄 Rotated 180°")
+                    except Exception as e:
+                        print(f"  ⚠️  Could not apply rotation: {e}")
+                        
+                except Exception as e:
+                    print(f"RAW decode failed: {e}")
+                    err_img = create_error_image(thumb_size, f"RAW Error:\n{str(e)}")
+                    return err_img, err_img
+        else:
+            err_img = create_error_image(thumb_size, "RAW support requires 'rawpy'")
+            return err_img, err_img
+
+        # Generate 8-bit thumbnail
+        try:
+            # Safety check
+            if full is None:
+                err_img = create_error_image(thumb_size, "Decoding failed: No image data")
+                return err_img, err_img
+            
+            if full.dtype == np.uint16:
+                # Simple compression for thumbnail
+                thumb_arr = (full >> 8).astype(np.uint8)
+            else:
+                thumb_arr = full
+                
+            thumb=Image.fromarray(thumb_arr).copy()
+            thumb.thumbnail(thumb_size, Image.BILINEAR)
+            thumb=np.array(thumb,dtype=np.uint8)
+        except Exception as e:
+            print(f"Thumbnail generation failed: {e}")
+            err_img = create_error_image(thumb_size, f"Thumbnail error:\n{str(e)}")
+            return err_img, err_img
         
-    thumb=Image.fromarray(thumb_arr).copy()
-    thumb.thumbnail(thumb_size, Image.BILINEAR)
-    thumb=np.array(thumb,dtype=np.uint8)
-    return full, thumb
+        # Save to cache for next time
+        try:
+            from cache_manager import save_to_cache
+            save_to_cache(path, full, thumb)
+        except Exception:
+            # Cache save failed, but decoding succeeded - continue
+            pass
+        
+        return full, thumb
+    
+    except Exception as e:
+        # Master exception handler
+        import traceback
+        print(f"❌ Unexpected decode error for {path}")
+        print(f"   Error: {str(e)}")
+        print(f"   Traceback:\n{traceback.format_exc()}")
+        err_img = create_error_image(thumb_size, f"Error:\n{str(e)}")
+        return err_img, err_img
 
 def get_image_metadata(path):
     """
     Extract metadata from image file.
     Returns a dict with keys: Name, Size, Dimensions, Camera, ISO, Aperture, Shutter, Lens, Date
     """
+    import os  # Import here to avoid scope issues
+    
     meta = {
         "Name": os.path.basename(path),
         "Size": f"{os.path.getsize(path) / (1024*1024):.2f} MB",
@@ -729,19 +1061,252 @@ def get_image_metadata(path):
                     pass
             except (subprocess.TimeoutExpired, Exception) as e:
                 print(f"exiftool error: {e}, falling back to rawpy")
+    except:
+        pass
             
-            # Get dimensions from rawpy
-            if rawpy is not None:
+    # For RAW files: Try ExifTool first (if available), then fallback to embedded EXIF
+    RAW_EXTENSIONS = ('.cr3', '.arw', '.nef', '.dng', '.orf', '.raf', '.rw2', '.cr2', '.nrw')
+    if ext in RAW_EXTENSIONS:
+        # Try to find ExifTool
+        exiftool_path = None
+        import os
+        possible_locations = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exiftool.exe'),  # Same dir as imaging.py
+            os.path.join(os.getcwd(), 'exiftool.exe'),  # Current working directory
+            'exiftool.exe',  # In PATH
+            'exiftool',  # In PATH (no .exe)
+        ]
+        
+        for loc in possible_locations:
+            if os.path.isfile(loc):
+                exiftool_path = loc
+                break
+        
+        # Try ExifTool if found
+        if exiftool_path:
+            print(f"🔍 Using ExifTool for metadata: {ext.upper()}")
+            try:
+                import subprocess
+                import json
+                
+                result = subprocess.run(
+                    [exiftool_path, '-j', '-Model', '-ISO', '-ExposureTime', '-FNumber',
+                     '-LensModel', '-DateTimeOriginal', '-ImageWidth', '-ImageHeight', str(path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    data = json.loads(result.stdout)[0]
+                    
+                    if 'Model' in data:
+                        meta["Camera"] = str(data['Model']).strip()
+                        print(f"  ✓ Camera: {meta['Camera']}")
+                    if 'ISO' in data:
+                        meta["ISO"] = str(data['ISO'])
+                        print(f"  ✓ ISO: {meta['ISO']}")
+                    if 'ExposureTime' in data:
+                        exp = data['ExposureTime']
+                        meta["Shutter"] = f"{exp}s" if isinstance(exp, str) and '/' in exp else f"{exp}s"
+                        print(f"  ✓ Shutter: {meta['Shutter']}")
+                    if 'FNumber' in data:
+                        meta["Aperture"] = f"f/{data['FNumber']}"
+                        print(f"  ✓ Aperture: {meta['Aperture']}")
+                    if 'LensModel' in data:
+                        meta["Lens"] = str(data['LensModel']).strip()
+                        print(f"  ✓ Lens: {meta['Lens']}")
+                    if 'DateTimeOriginal' in data:
+                        meta["Date"] = str(data['DateTimeOriginal'])
+                        print(f"  ✓ Date: {meta['Date']}")
+                    if 'ImageWidth' in data and 'ImageHeight' in data:
+                        meta["Dimensions"] = f"{data['ImageWidth']} x {data['ImageHeight']}"
+                        print(f"  ✓ Dimensions: {meta['Dimensions']}")
+                else:
+                    print(f"  ⚠️  ExifTool returned no data")
+            except Exception as e:
+                print(f"  ⚠️  ExifTool failed: {e}")
+        
+        # Fallback: Extract EXIF from embedded JPEG preview
+        if meta["Camera"] == "-" or meta["ISO"] == "-":
+            print(f"🔍 Attempting EXIF extraction from embedded preview for {ext.upper()}: {path}")
+        try:
+            import mmap
+            import struct
+            from io import BytesIO
+            from PIL import Image as PILImage
+            from PIL.ExifTags import TAGS
+            
+            # Find embedded JPEG preview in RAW file
+            with open(path, 'rb') as f:
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    # Search for JPEG markers
+                    idx = mm.find(b'\xff\xd8')
+                    
+                    if idx != -1:
+                        # Found JPEG, try to extract EXIF from it
+                        try:
+                            import exifread
+                            
+                            # Create a file-like object from the JPEG data
+                            stream = BytesIO(mm[idx:idx+500000])  # Read first 500KB for EXIF
+                            tags = exifread.process_file(stream, details=False)
+                            
+                            if tags:
+                                print(f"  ✓ Found EXIF in embedded preview ({len(tags)} tags)")
+                                print(f"  🔧 Available tags: {', '.join(list(tags.keys())[:20])}")  # Show first 20 tags
+                                
+                                # Camera Model
+                                if meta["Camera"] == "-":
+                                    if 'Image Model' in tags:
+                                        meta["Camera"] = str(tags['Image Model']).strip()
+                                        print(f"  ✓ Camera: {meta['Camera']}")
+                                
+                                # ISO
+                                if meta["ISO"] == "-":
+                                    if 'EXIF ISOSpeedRatings' in tags:
+                                        meta["ISO"] = str(tags['EXIF ISOSpeedRatings'])
+                                        print(f"  ✓ ISO: {meta['ISO']}")
+                                
+                                # Shutter Speed
+                                if meta["Shutter"] == "-":
+                                    if 'EXIF ExposureTime' in tags:
+                                        exp = tags['EXIF ExposureTime']
+                                        if hasattr(exp, 'values') and len(exp.values) > 0:
+                                            val = exp.values[0]
+                                            if hasattr(val, 'num') and hasattr(val, 'den'):
+                                                if val.num == 1:
+                                                    meta["Shutter"] = f"1/{val.den}s"
+                                                else:
+                                                    meta["Shutter"] = f"{val.num/val.den:.2f}s"
+                                            else:
+                                                v = float(val)
+                                                if v < 1:
+                                                    meta["Shutter"] = f"1/{int(1/v)}s"
+                                                else:
+                                                    meta["Shutter"] = f"{v:.2f}s"
+                                        else:
+                                            meta["Shutter"] = str(exp)
+                                        print(f"  ✓ Shutter: {meta['Shutter']}")
+                                
+                                # Aperture
+                                if meta["Aperture"] == "-":
+                                    if 'EXIF FNumber' in tags:
+                                        fnum = tags['EXIF FNumber']
+                                        if hasattr(fnum, 'values') and len(fnum.values) > 0:
+                                            val = fnum.values[0]
+                                            if hasattr(val, 'num') and hasattr(val, 'den'):
+                                                meta["Aperture"] = f"f/{val.num/val.den:.1f}"
+                                            else:
+                                                meta["Aperture"] = f"f/{float(val):.1f}"
+                                        else:
+                                            meta["Aperture"] = str(fnum)
+                                        print(f"  ✓ Aperture: {meta['Aperture']}")
+                                
+                                # Lens Model
+                                if meta["Lens"] == "-":
+                                    if 'EXIF LensModel' in tags:
+                                        meta["Lens"] = str(tags['EXIF LensModel']).strip()
+                                        print(f"  ✓ Lens: {meta['Lens']}")
+                                
+                                # Date
+                                if meta["Date"] == "-":
+                                    if 'EXIF DateTimeOriginal' in tags:
+                                        meta["Date"] = str(tags['EXIF DateTimeOriginal'])
+                                        print(f"  ✓ Date: {meta['Date']}")
+                                    elif 'Image DateTime' in tags:
+                                        meta["Date"] = str(tags['Image DateTime'])
+                                        print(f"  ✓ Date: {meta['Date']}")
+                            else:
+                                print(f"  ⚠️  No EXIF found in embedded preview")
+                        except Exception as e:
+                            print(f"  ⚠️  Could not extract EXIF from preview: {e}")
+                    else:
+                        print(f"  ⚠️  No JPEG preview found in file")
+                        
+        except Exception as e:
+            print(f"  ⚠️  Preview EXIF extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            pass
+    
+    # For JPEG/PNG: Direct EXIF extraction
+    elif ext in ('.jpg', '.jpeg', '.png', '.tif', '.tiff'):
+        print(f"🔍 Attempting EXIF extraction for {ext.upper()}: {path}")
+        try:
+            from PIL import Image as PILImage
+            from PIL.ExifTags import TAGS
+            
+            with PILImage.open(path) as img:
+                exif = img.getexif()
+                
+                if exif:
+                    # Camera Model
+                    if meta["Camera"] == "-":
+                        model = exif.get(272)
+                        if model:
+                            meta["Camera"] = str(model).strip()
+                            print(f"  ✓ Camera: {meta['Camera']}")
+                    
+                    # ISO
+                    if meta["ISO"] == "-":
+                        iso = exif.get(34855)
+                        if iso:
+                            meta["ISO"] = str(iso)
+                            print(f"  ✓ ISO: {meta['ISO']}")
+                    
+                    # Date
+                    if meta["Date"] == "-":
+                        date = exif.get(36867) or exif.get(306)
+                        if date:
+                            meta["Date"] = str(date)
+                            print(f"  ✓ Date: {meta['Date']}")
+        except Exception as e:
+            print(f"  ⚠️  EXIF extraction failed: {e}")
+
+    # Fallback: Try rawpy for Dimensions if still missing
+    if rawpy is not None and ext in RAW_EXTENSIONS:
+        if meta["Dimensions"] == "-":
+            print(f"🔍 Attempting rawpy for dimensions: {ext.upper()}")
+            try:
+                with rawpy.imread(path) as raw:
+                    if hasattr(raw, 'sizes'):
+                         meta["Dimensions"] = f"{raw.sizes.width} x {raw.sizes.height}"
+                         print(f"  ✓ Dimensions: {meta['Dimensions']}")
+            except Exception as e:
+                print(f"❌ Rawpy error for {path}: {e}")
+                pass
+            
+
+    # CR3 Fallback: If Camera model is still missing (ExifTool failed/missing)
+    if meta["Camera"] == "-" and ext == '.cr3':
+        try:
+            with open(path, 'rb') as f:
+                # Read start of file
+                header = f.read(8192) # First 8KB should contain the Make/Model
+                
+                # Search for "Canon EOS"
                 try:
-                    with rawpy.imread(path) as raw:
-                        meta["Dimensions"] = f"{raw.sizes.width} x {raw.sizes.height}"
+                    idx = header.find(b'Canon EOS')
+                    if idx != -1:
+                        # Extract string until null byte or non-printable
+                        end = idx
+                        while end < len(header) and 32 <= header[end] <= 126:
+                            end += 1
+                        
+                        model_str = header[idx:end].decode('utf-8', errors='ignore')
+                        if len(model_str) > 5:
+                            meta["Camera"] = model_str.strip()
                 except:
                     pass
+        except:
+            pass
         
-        else:
-            # For JPEG/PNG/TIFF, use PIL
-            try:
-                img = Image.open(path)
+    # For JPEG/PNG/TIFF, use PIL if dimensions/camera missing
+    if ext not in ('.arw', '.cr2', '.cr3', '.nef', '.dng', '.orf', '.raf', '.rw2'):
+        try:
+            img = Image.open(path)
+            if meta["Dimensions"] == "-":
                 meta["Dimensions"] = f"{img.width} x {img.height}"
                 
                 # Extract EXIF
@@ -771,12 +1336,24 @@ def get_image_metadata(path):
                             meta["Lens"] = str(value).strip()
                         elif tag == "DateTimeOriginal": 
                             meta["Date"] = str(value)
-            except Exception as e:
-                print(f"PIL error: {e}")
+        except Exception as e:
+            print(f"PIL error: {e}")
                 
-    except Exception as e:
-        print(f"Metadata error: {e}")
+
         
     return meta
 
+
+def create_error_image(size, text):
+    """Creates a placeholder image with error text"""
+    try:
+        from PIL import ImageDraw
+        img = Image.new('RGB', (800, 600), color=(50, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 50), text, fill=(255, 255, 255))
+        img.thumbnail(size, Image.LANCZOS)
+        return np.array(img, dtype=np.uint8)
+    except:
+        # If even error image creation fails, return black image
+        return np.zeros((size[1], size[0], 3), dtype=np.uint8)
 

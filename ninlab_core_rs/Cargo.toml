@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 numpy = "0.22"
 rayon = "1.10"
+kamadak-exif = "0.5" # For metadata extraction

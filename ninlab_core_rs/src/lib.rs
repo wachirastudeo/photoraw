@@ -1,51 +1,64 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use numpy::{PyReadonlyArray3, PyArray1, PyArray3, PyArrayMethods};
 use std::collections::HashMap;
+use rayon::prelude::*;
+use std::fs::File;
+use std::io::BufReader;
 
 mod pipeline;
 use pipeline::{process_pipeline, ImageSettings};
 
+// ... (process_image and calculate_histogram functions remain unchanged)
+
+/// Read image metadata using Rust (fast & robust for RAW/CR3)
 #[pyfunction]
-#[pyo3(signature = (image, settings, lut=None))]
-fn process_image<'py>(
-    py: Python<'py>,
-    image: PyReadonlyArray3<u8>,
-    settings: HashMap<String, f32>,
-    lut: Option<Vec<u8>>,
-) -> PyResult<Bound<'py, PyArray3<u8>>> {
-    let image_view = image.as_array();
-    let shape = image_view.shape();
-    let height = shape[0];
-    let width = shape[1];
+fn read_metadata(py: Python, path: &str) -> PyResult<PyObject> {
+    let dict = PyDict::new_bound(py);
     
-    // Ensure contiguous array for slice access
-    let image_slice = image_view.as_slice().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err("Input array must be contiguous")
-    })?;
-
-    let img_settings = ImageSettings::from_hashmap(&settings);
-    let lut_slice = lut.as_deref();
-
-    let output_vec = process_pipeline(image_slice, width, height, &img_settings, lut_slice);
-
-    // Create 1D array and reshape
-    // numpy 0.22: PyArray1::from_vec returns Bound<'py, PyArray1<T>>
-    let flat_array = PyArray1::from_vec_bound(py, output_vec);
+    // Open file
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Ok(dict.to_object(py)), 
+    };
     
-    // reshape returns PyResult<Bound<'py, PyArray<T, D>>> or similar
-    // Actually, in numpy 0.21/0.22, reshape might return PyResult<Bound<'py, PyArrayDyn<T>>>
-    // We need to check the exact API.
-    // Assuming flat_array.reshape((h, w, 3)) works.
-    let reshaped = flat_array.reshape((height, width, 3))?;
+    // Read EXIF with kamadak-exif
+    let mut reader = BufReader::new(file);
+    let exifreader = exif::Reader::new();
     
-    // Convert to PyArray3
-    <pyo3::Bound<'_, PyAny> as Clone>::clone(&reshaped).downcast_into().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("Failed to cast reshaped array to PyArray3")
-    })
+    if let Ok(exif) = exifreader.read_from_container(&mut reader) {
+        for f in exif.fields() {
+            let key = match f.tag {
+                exif::Tag::Model => "Camera",
+                exif::Tag::Make => "Make",
+                exif::Tag::LensModel => "Lens",
+                // ISO can be PhotographicSensitivity or ISOSpeedRatings
+                exif::Tag::PhotographicSensitivity | exif::Tag::ISOSpeedRatings => "ISO",
+                exif::Tag::FNumber => "Aperture",
+                exif::Tag::ExposureTime => "Shutter",
+                exif::Tag::DateTimeOriginal => "Date",
+                _ => continue,
+            };
+            
+            // If the key is already set, don't overwrite (unless it's better?)
+            if dict.contains(key)? {
+                 continue;
+            }
+
+            let val = f.display_value().with_unit(&exif).to_string();
+            // Remove quotes for cleaner UI
+            let clean_val = val.trim_matches('"').to_string();
+            dict.set_item(key, clean_val)?;
+        }
+    }
+
+    Ok(dict.to_object(py))
 }
 
 #[pymodule]
 fn ninlab_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_image, m)?)?;
+    m.add_function(wrap_pyfunction!(calculate_histogram, m)?)?;
+    m.add_function(wrap_pyfunction!(read_metadata, m)?)?;
     Ok(())
 }

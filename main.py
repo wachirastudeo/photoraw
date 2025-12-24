@@ -46,6 +46,9 @@ class Main(QMainWindow):
         self.create_menus()
         QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
         self.pool=QThreadPool.globalInstance()
+        
+        # Clean up old cache files in background
+        self._cleanup_cache()
 
         # Load project data
         self.project_dir = self._load_last_project()
@@ -159,9 +162,13 @@ class Main(QMainWindow):
         self.cmb_sharp.currentTextChanged.connect(lambda _ : (self._remember_ui(), self._kick_preview_thread(force=True)))
         vc_layout.addWidget(QLabel("Sharp:")); vc_layout.addWidget(self.cmb_sharp)
         
-        self.chk_low_spec = QCheckBox("Low Spec")
-        self.chk_low_spec.toggled.connect(self.toggle_low_spec_mode)
-        vc_layout.addWidget(self.chk_low_spec)
+        self.btn_low_spec = QPushButton("Fast Mode")
+        self.btn_low_spec.setCheckable(True)
+        self.btn_low_spec.setChecked(False)
+        self.btn_low_spec.setToolTip("Enable for faster preview (240px) on slower computers")
+        self.btn_low_spec.clicked.connect(self.toggle_low_spec_mode)
+        self.btn_low_spec.setFixedWidth(90)
+        vc_layout.addWidget(self.btn_low_spec)
         
         row1.addWidget(self.view_controls_widget)
 
@@ -263,7 +270,7 @@ class Main(QMainWindow):
         self.tabs.setDocumentMode(True)
         self.tabs.setStyleSheet("") # Reset inline style to use global stylesheet
         self.tabs.addTab(self.group_basic(), "Basic")
-        self.tabs.addTab(self.group_tone(), "Tone")
+        # self.tabs.addTab(self.group_tone(), "Tone")  # Moved to Basic tab
         self.tabs.addTab(self.group_color(), "Color")
         self.tabs.addTab(self.group_effects(), "Effects")
         self.tabs.addTab(self.group_hsl(), "HSL")
@@ -403,18 +410,160 @@ class Main(QMainWindow):
         
         return scroll
 
+    def update_info_tab(self, image_path=None):
+        """Update Info tab with metadata from the current or specified image"""
+        if image_path is None:
+            # Try to get current image path
+            if hasattr(self, 'current') and self.current >= 0 and self.current < len(self.items):
+                image_path = self.items[self.current]["name"]
+            else:
+                # No image selected, clear info
+                self.lbl_name.setText("-")
+                self.lbl_size.setText("-")
+                self.lbl_dim.setText("-")
+                self.lbl_camera.setText("-")
+                self.lbl_iso.setText("-")
+                self.lbl_aperture.setText("-")
+                self.lbl_shutter.setText("-")
+                self.lbl_lens.setText("-")
+                self.lbl_date.setText("-")
+                return
+        
+        try:
+            from imaging import get_image_metadata
+            meta = get_image_metadata(image_path)
+            
+            self.lbl_name.setText(meta.get("Name", "-"))
+            self.lbl_size.setText(meta.get("Size", "-"))
+            self.lbl_dim.setText(meta.get("Dimensions", "-"))
+            self.lbl_camera.setText(meta.get("Camera", "-"))
+            self.lbl_iso.setText(meta.get("ISO", "-"))
+            self.lbl_aperture.setText(meta.get("Aperture", "-"))
+            self.lbl_shutter.setText(meta.get("Shutter", "-"))
+            self.lbl_lens.setText(meta.get("Lens", "-"))
+            self.lbl_date.setText(meta.get("Date", "-"))
+            
+            print(f"📊 Info tab updated for: {meta.get('Name', '?')}")
+        except Exception as e:
+            print(f"❌ Error updating info tab: {e}")
+            import traceback
+            traceback.print_exc()
+
     def group_basic(self):
+        # Create container with VBoxLayout to stack histogram on top
+        from histogram_widget import HistogramWidget
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(10)
+        
+        
+        # Histogram header with toggle button
+        histogram_header = QWidget()
+        histogram_header_layout = QHBoxLayout(histogram_header)
+        histogram_header_layout.setContentsMargins(0, 0, 0, 0)
+        histogram_header_layout.setSpacing(8)
+        
+        histogram_label = QLabel("<b>Histogram</b>")
+        self.btn_histogram_toggle = QPushButton("Show")
+        self.btn_histogram_toggle.setCheckable(True)
+        self.btn_histogram_toggle.setChecked(False)  # Default: hidden
+        self.btn_histogram_toggle.setFixedWidth(60)
+        self.btn_histogram_toggle.clicked.connect(self._toggle_histogram)
+        
+        histogram_header_layout.addWidget(histogram_label)
+        histogram_header_layout.addStretch()
+        histogram_header_layout.addWidget(self.btn_histogram_toggle)
+        container_layout.addWidget(histogram_header)
+        
+        # Histogram widget - hidden by default for performance
+        self.histogram_widget = HistogramWidget()
+        self.histogram_widget.setVisible(False)
+        container_layout.addWidget(self.histogram_widget)
+        
+        # Basic adjustments group
         g=QGroupBox("Basic"); f=QFormLayout(g)
         from imaging import DEFAULTS
+        
+        # Original Basic controls
         for k,conf in [("exposure",(-3,3,0.01)),("contrast",(-1,1,0.01)),("gamma",(0.3,2.2,0.01))]:
             s,l=add_slider(f, QLabel(k.capitalize()),k,conf[0],conf[1],DEFAULTS[k],conf[2],
                             on_change=self.on_change,on_reset=self.on_reset_one,
                             on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
             self.sliders[k]={"s":s,"l":l,"step":conf[2]}
+        
+        # Add separator
+        f.addRow(QLabel(""))
+        
+        # White Balance controls (moved from Color tab)
+        wb_layout = QHBoxLayout()
+        wb_label = QLabel("<b>White Balance</b>")
+        btn_auto_wb = QPushButton("Auto WB")
+        btn_auto_wb.setToolTip("Auto White Balance")
+        btn_auto_wb.clicked.connect(self.apply_auto_white_balance)
+        wb_layout.addWidget(wb_label)
+        wb_layout.addStretch(1)
+        wb_layout.addWidget(btn_auto_wb)
+        f.addRow(wb_layout)
+        
+        for k,lab in [("temperature","Temperature"),("tint","Tint")]:
+            s,l=add_slider(f, QLabel(lab), k, -1,1,DEFAULTS[k],0.01,
+                           on_change=self.on_change,on_reset=self.on_reset_one,
+                           on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
+            self.sliders[k]={"s":s,"l":l,"step":0.01}
+        
+        # Add separator
+        f.addRow(QLabel(""))
+        
+        # Tone controls (moved from Tone tab)
+        f.addRow(QLabel("<b>Tone</b>"))
+        for k,lab in [("highlights","Highlights"),("shadows","Shadows"),("whites","Whites"),("blacks","Blacks")]:
+            s,l=add_slider(f, QLabel(lab), k, -1,1,DEFAULTS[k],0.01,
+                           on_change=self.on_change,on_reset=self.on_reset_one,
+                           on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
+            self.sliders[k]={"s":s,"l":l,"step":0.01}
+        
+        s,l=add_slider(f, QLabel("Mid Contrast"), "mid_contrast", -1,1,DEFAULTS["mid_contrast"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
+        self.sliders["mid_contrast"]={"s":s,"l":l,"step":0.01}
+        
+        s,l=add_slider(f, QLabel("Dehaze"), "dehaze", -0.5,1.0,DEFAULTS["dehaze"],0.01,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
+        self.sliders["dehaze"]={"s":s,"l":l,"step":0.01}
+        
+        # Add separator
+        f.addRow(QLabel(""))
+        
+        # Transform controls (Angle for straightening)
+        f.addRow(QLabel("<b>Transform</b>"))
+        s,l=add_slider(f, QLabel("Angle"), "angle", -10.0,10.0,DEFAULTS["angle"],0.1,
+                       on_change=self.on_change,on_reset=self.on_reset_one,
+                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
+        self.sliders["angle"]={"s":s,"l":l,"step":0.1}
+        
+        # Reset button for all Basic + White Balance + Tone + Transform controls
         btn = QPushButton("Reset Basic")
-        btn.clicked.connect(lambda: self.reset_tab_settings(["exposure", "contrast", "gamma"]))
+        btn.clicked.connect(lambda: self.reset_tab_settings([
+            "exposure", "contrast", "gamma", 
+            "temperature", "tint",
+            "highlights", "shadows", "whites", "blacks", "mid_contrast", "dehaze",
+            "angle"
+        ]))
         f.addRow(btn)
-        return g
+        
+        container_layout.addWidget(g)
+        container_layout.addStretch(1)
+        
+        # Wrap in scroll area to prevent window from growing beyond screen
+        scroll = QScrollArea()
+        scroll.setWidget(container)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        
+        return scroll
 
     def group_presets_tab(self):
         container = QWidget()
@@ -506,13 +655,14 @@ class Main(QMainWindow):
 
     def group_color(self):
         g=QGroupBox("Color"); f=QFormLayout(g)
-        for k,lab in [("saturation","Saturation"),("vibrance","Vibrance"),("temperature","Temperature"),("tint","Tint")]:
+        # Temperature and Tint moved to Basic tab
+        for k,lab in [("saturation","Saturation"),("vibrance","Vibrance")]:
             s,l=add_slider(f, QLabel(lab), k, -1,1,DEFAULTS[k],0.01,
                            on_change=self.on_change,on_reset=self.on_reset_one,
                            on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
             self.sliders[k]={"s":s,"l":l,"step":0.01}
         btn = QPushButton("Reset Color")
-        btn.clicked.connect(lambda: self.reset_tab_settings(["saturation", "vibrance", "temperature", "tint"]))
+        btn.clicked.connect(lambda: self.reset_tab_settings(["saturation", "vibrance"]))
         f.addRow(btn)
         return g
 
@@ -742,9 +892,16 @@ class Main(QMainWindow):
             # Restore threads
             self.pool.setMaxThreadCount(cpu_count)
             self.update_status(f"Low Spec Mode: OFF (Threads={cpu_count})")
-            
-        self._remember_ui()
-        self._kick_preview_thread(force=True)
+    
+    def _toggle_histogram(self):
+        """Toggle histogram visibility"""
+        is_visible = self.btn_histogram_toggle.isChecked()
+        self.histogram_widget.setVisible(is_visible)
+        self.btn_histogram_toggle.setText("Hide" if is_visible else "Show")
+        
+        # Update histogram if showing
+        if is_visible and self.current >= 0:
+            self._kick_preview_thread(force=True)
 
     # ------- transforms -------
     def bump_rotate(self, delta):
@@ -760,6 +917,47 @@ class Main(QMainWindow):
         st["flip_h"] = not bool(st.get("flip_h", False))
         self._persist_current_item()
         self._kick_preview_thread(force=True)
+
+    def apply_auto_white_balance(self):
+        """Apply automatic white balance to current image"""
+        if self.current < 0:
+            QMessageBox.information(self, "Info", "No image selected")
+            return
+        
+        it = self.items[self.current]
+        if it["full"] is None:
+            return
+        
+        # Save current state for undo
+        self._push_undo(it)
+        self.redo_stack.get(it["name"], []).clear()
+        
+        # Convert image to float for processing
+        if it["full"].dtype == np.uint16:
+            rgb_float = it["full"].astype(np.float32) / 65535.0
+        else:
+            rgb_float = it["full"].astype(np.float32) / 255.0
+        
+        # Calculate auto white balance
+        from imaging import auto_white_balance
+        temperature, tint = auto_white_balance(rgb_float)
+        
+        # Apply the calculated values
+        it["settings"]["temperature"] = temperature
+        it["settings"]["tint"] = tint
+        
+        # Update UI sliders
+        if "temperature" in self.sliders:
+            self.sliders["temperature"]["s"].setValue(int(temperature * 100))
+            self.sliders["temperature"]["l"].setText(f"{temperature:.2f}")
+        if "tint" in self.sliders:
+            self.sliders["tint"]["s"].setValue(int(tint * 100))
+            self.sliders["tint"]["l"].setText(f"{tint:.2f}")
+        
+        # Update preview
+        self._persist_current_item()
+        self._kick_preview_thread(force=True)
+        self.update_status("Auto White Balance applied")
 
     def reset_all_settings(self):
         if self.current < 0:
@@ -848,7 +1046,19 @@ class Main(QMainWindow):
         self._push_undo(it)
         self.redo_stack.get(it["name"], []).clear()
         it["settings"][key]=float(value)
-        self.debounce.start(25 if self.live_dragging else 100)
+        
+        # Balanced approach:
+        # - Fast Mode: instant update (no debounce)
+        # - Normal Mode: small debounce to reduce CPU while staying responsive
+        if self.live_dragging:
+            if hasattr(self, "btn_low_spec") and self.btn_low_spec.isChecked():
+                # Fast Mode: instant update
+                self._kick_preview_thread()
+            else:
+                # Normal Mode: small debounce for smoothness
+                self.debounce.start(50)
+        else:
+            self.debounce.start(100)
         self._persist_current_item()
 
     def _debounced_actions(self):
@@ -966,31 +1176,70 @@ class Main(QMainWindow):
         row=rows[0].row(); name=self.film.item(row).data(Qt.UserRole)
         self.current=next((i for i,v in enumerate(self.items) if v["name"]==name),-1)
         if self.current == -1: return
+        
+        # Show loading status immediately
+        self.update_status("Loading image...")
+        
         # initialize undo stack for this item
         cur_it = self.items[self.current]
         self.undo_stack.setdefault(name, [dict(cur_it["settings"])])
         self.redo_stack.setdefault(name, [])
         
-        # Update Info Tab
-        try:
-            from imaging import get_image_metadata
-            # name is already the full path
-            meta = get_image_metadata(name)
-            self.lbl_name.setText(meta.get("Name", "-"))
-            self.lbl_size.setText(meta.get("Size", "-"))
-            self.lbl_dim.setText(meta.get("Dimensions", "-"))
-            self.lbl_camera.setText(meta.get("Camera", "-"))
-            self.lbl_iso.setText(meta.get("ISO", "-"))
-            self.lbl_aperture.setText(meta.get("Aperture", "-"))
-            self.lbl_shutter.setText(meta.get("Shutter", "-"))
-            self.lbl_lens.setText(meta.get("Lens", "-"))
-            self.lbl_date.setText(meta.get("Date", "-"))
-        except Exception as e:
-            print(f"Error updating info: {e}")
-        
+        # Load UI and preview IMMEDIATELY (fast)
         self.load_settings_to_ui()
         self._mark_active_preset(cur_it.get("applied_preset"))
         self._kick_preview_thread(force=True)
+        
+        # Update metadata ASYNCHRONOUSLY (slow) - don't block UI
+        # Use cached metadata if available
+        if not hasattr(self, '_metadata_cache'):
+            self._metadata_cache = {}
+        
+        if name in self._metadata_cache:
+            # Use cached metadata
+            meta = self._metadata_cache[name]
+            self._update_info_ui(meta)
+        else:
+            # Show placeholder while loading
+            self.lbl_name.setText(os.path.basename(name))
+            self.lbl_size.setText("Loading...")
+            self.lbl_dim.setText("-")
+            self.lbl_camera.setText("-")
+            self.lbl_iso.setText("-")
+            self.lbl_aperture.setText("-")
+            self.lbl_shutter.setText("-")
+            self.lbl_lens.setText("-")
+            self.lbl_date.setText("-")
+            
+            # Load metadata in background thread
+            from workers import MetadataWorker
+            worker = MetadataWorker(name)
+            worker.signals.ready.connect(self._on_metadata_loaded)
+            self.pool.start(worker)
+    
+    def _update_info_ui(self, meta):
+        """Update info tab UI with metadata"""
+        self.lbl_name.setText(meta.get("Name", "-"))
+        self.lbl_size.setText(meta.get("Size", "-"))
+        self.lbl_dim.setText(meta.get("Dimensions", "-"))
+        self.lbl_camera.setText(meta.get("Camera", "-"))
+        self.lbl_iso.setText(meta.get("ISO", "-"))
+        self.lbl_aperture.setText(meta.get("Aperture", "-"))
+        self.lbl_shutter.setText(meta.get("Shutter", "-"))
+        self.lbl_lens.setText(meta.get("Lens", "-"))
+        self.lbl_date.setText(meta.get("Date", "-"))
+    
+    def _on_metadata_loaded(self, path, meta):
+        """Callback when metadata is loaded"""
+        if not hasattr(self, '_metadata_cache'):
+            self._metadata_cache = {}
+        
+        # Cache the metadata
+        self._metadata_cache[path] = meta
+        
+        # Update UI only if this is still the current image
+        if self.current >= 0 and self.items[self.current]["name"] == path:
+            self._update_info_ui(meta)
 
     def toggle_star_selected(self):
         names = set()
@@ -1629,7 +1878,9 @@ class Main(QMainWindow):
         if self.live_dragging:
             if self.live_inflight:
                 return
-            use_edge = min(use_edge, 1600) # Use a smaller preview for live dragging
+            # Only reduce size if Fast Mode is enabled
+            if hasattr(self, "btn_low_spec") and self.btn_low_spec.isChecked():
+                use_edge = 240  # Fast Mode: very small for speed
 
         base_override = None
         cache = it.setdefault("preview_cache", {})
@@ -1657,9 +1908,20 @@ class Main(QMainWindow):
                 if max(h,w)>use_edge:
                     s = use_edge/float(max(h,w))
                     nw,nh = int(w*s), int(h*s)
-                    base_override = np.array(Image.fromarray(it["full"]).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+                    
+                    # Handle 16-bit images - convert to 8-bit before PIL operations
+                    if it["full"].dtype == np.uint16:
+                        # Simple 16-bit to 8-bit conversion (shift right by 8 bits)
+                        img_8bit = (it["full"] >> 8).astype(np.uint8)
+                        base_override = np.array(Image.fromarray(img_8bit).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
+                    else:
+                        base_override = np.array(Image.fromarray(it["full"]).resize((nw,nh), Image.BILINEAR), dtype=np.uint8)
                 else:
-                    base_override = it["full"]
+                    # Even for full size, convert 16-bit to 8-bit
+                    if it["full"].dtype == np.uint16:
+                        base_override = (it["full"] >> 8).astype(np.uint8)
+                    else:
+                        base_override = it["full"]
                 cache[cache_key] = base_override
 
         req_id = PreviewWorker.next_id()
@@ -1668,7 +1930,7 @@ class Main(QMainWindow):
                              is_zoomed=self.is_zoomed, zoom_point=self.zoom_point_norm,
                              preview_size=self.preview.size(),
                              processed_cache=cache,
-                             low_spec=self.chk_low_spec.isChecked() if hasattr(self, "chk_low_spec") else False,
+                             low_spec=self.btn_low_spec.isChecked() if hasattr(self, "btn_low_spec") else False,
                              panning=self._is_panning if hasattr(self, "_is_panning") else False)
         worker.signals.ready.connect(self._show_preview_pix)
         if self.live_dragging:
@@ -1724,6 +1986,20 @@ class Main(QMainWindow):
         self.preview.setPixmap(pm)
         self.preview.setAlignment(Qt.AlignCenter) # Force re-alignment
         self.live_inflight = False
+        
+        # Update histogram widget if exists and is visible - skip if hidden for performance
+        if hasattr(self, 'histogram_widget') and self.histogram_widget is not None and self.histogram_widget.isVisible():
+            # Only update histogram if NOT live dragging OR every 5th update
+            if not self.live_dragging:
+                self.histogram_widget.update_histogram(arr)
+            else:
+                # During live dragging, update less frequently to reduce lag
+                if not hasattr(self, '_histogram_skip_counter'):
+                    self._histogram_skip_counter = 0
+                self._histogram_skip_counter += 1
+                if self._histogram_skip_counter >= 5:  # Update every 5th frame
+                    self.histogram_widget.update_histogram(arr)
+                    self._histogram_skip_counter = 0
 
         # Update thumbnail
         if self.current >= 0:
@@ -1826,6 +2102,9 @@ class Main(QMainWindow):
 
     def _on_tab_changed(self, index):
         QTimer.singleShot(1, self._sync_scroll_tabs) # Delay sync to allow tab to become visible
+        # Update Info tab when it becomes visible
+        if hasattr(self, 'tabs') and self.tabs.tabText(index) == "Info":
+            self.update_info_tab()
 
     def showEvent(self, event):
         return super().showEvent(event)
@@ -2541,6 +2820,19 @@ class Main(QMainWindow):
             self.film.setCurrentRow(0)
             if self.stack.currentIndex() == 0:
                  pass # Library grid selection logic if needed
+    
+    def _cleanup_cache(self):
+        """Clean up old cache files in background"""
+        def cleanup_worker():
+            try:
+                from cache_manager import clear_old_cache
+                clear_old_cache(max_age_days=30)
+            except Exception as e:
+                print(f"Cache cleanup failed: {e}")
+        
+        from threading import Thread
+        thread = Thread(target=cleanup_worker, daemon=True)
+        thread.start()
 
 
 if __name__=="__main__":

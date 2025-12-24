@@ -19,6 +19,12 @@ class DecodeWorker(QRunnable):
             full, thumb = decode_image(self.path, (self.thumb_w, self.thumb_h))
             self.signals.done.emit({"name":self.path,"full":full,"thumb":thumb})
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ Decode failed: {self.path}")
+            print(f"   Error type: {type(e).__name__}")
+            print(f"   Error message: {str(e)}")
+            print(f"   Traceback:\n{error_details}")
             self.signals.error.emit(f"Decode error: {self.path}\n{e}")
 
 class PreviewSignals(QObject):
@@ -161,12 +167,10 @@ class PreviewWorker(QRunnable):
             # Normal preview logic
             target_long_edge = self.long_edge
             
-            # Aggressive downsampling for live preview in low spec mode
-            if self.live and self.low_spec:
-                target_long_edge = max(320, self.long_edge // 3)  # More aggressive: //3 instead of //2
-            elif self.live:
-                # Even in normal mode, use smaller preview during live adjustment
-                target_long_edge = max(480, self.long_edge // 2)
+            # Only reduce preview quality if explicitly in Fast Mode (low_spec)
+            if self.low_spec and self.live:
+                target_long_edge = 240  # Fast Mode: super small for speed
+            # Normal live mode: keep full quality, just use fast_mode for processing
             
             # Use fast resize during live preview, quality resize otherwise
             base = self.base_override if self.base_override is not None else self._resize_long(
@@ -264,8 +268,9 @@ class ExportWorker(QRunnable):
                     seq = start_num + (i - 1)
                     filename = f"{custom_text}-{seq:03d}"
                 else:
+                    # Original Name mode - use original filename without suffix
                     base=os.path.splitext(os.path.basename(it["name"]))[0]
-                    filename = f"{base}{suffix}"
+                    filename = base
                 
                 out_path = os.path.join(self.out_dir, filename)
                 
@@ -321,3 +326,33 @@ class ExportWorker(QRunnable):
             self.signals.done.emit(self.out_dir)
         except Exception as e:
             self.signals.error.emit(str(e))
+
+class MetadataSignals(QObject):
+    ready=Signal(str, dict)  # (path, metadata_dict)
+
+class MetadataWorker(QRunnable):
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self.signals = MetadataSignals()
+    
+    def run(self):
+        """Load metadata in background thread"""
+        try:
+            from imaging import get_image_metadata
+            meta = get_image_metadata(self.path)
+            self.signals.ready.emit(self.path, meta)
+        except Exception as e:
+            # Return empty metadata on error
+            meta = {
+                "Name": os.path.basename(self.path),
+                "Size": "-",
+                "Dimensions": "-",
+                "Camera": "-",
+                "ISO": "-",
+                "Aperture": "-",
+                "Shutter": "-",
+                "Lens": "-",
+                "Date": "-"
+            }
+            self.signals.ready.emit(self.path, meta)
