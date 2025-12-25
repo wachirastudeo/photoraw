@@ -99,7 +99,7 @@ class PreviewWorker(QRunnable):
              return np.dstack(chans)
 
         # Use faster resampling for live preview, higher quality for final
-        resample = Image.NEAREST if use_fast else Image.LANCZOS
+        resample = Image.BILINEAR if use_fast else Image.LANCZOS
         return np.array(Image.fromarray(arr).resize((nw, nh), resample), dtype=np.uint8)
 
     def run(self):
@@ -155,7 +155,13 @@ class PreviewWorker(QRunnable):
                 
                 # Process color/effects on the small patch (Fast!)
                 # Enable fast mode if live dragging OR panning
-                is_fast = self.live or self.panning
+                # Process color/effects on the small patch (Fast!)
+                # Enable fast mode if live dragging OR panning
+                # BUT if we are high-res (>=900), try to maintain quality (keep Clarity/Texture)
+                is_fast = (self.live or self.panning)
+                if self.long_edge >= 900 and not self.low_spec:
+                    is_fast = False
+
                 out = process_image_fast(raw_patch, patch_adj, fast_mode=is_fast)
                 
                 # Apply preview sharpening
@@ -187,7 +193,12 @@ class PreviewWorker(QRunnable):
                 # src01 = base_local.astype(np.float32)/255.0
                 # after01 = pipeline(src01, self.adj, fast_mode=self.live)
                 # a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
-                a = process_image_fast(base_local, self.adj, fast_mode=self.live)
+                
+                is_fast = self.live
+                if self.long_edge >= 900 and not self.low_spec:
+                    is_fast = False
+                    
+                a = process_image_fast(base_local, self.adj, fast_mode=is_fast)
                 a = apply_transforms(a, self.adj)
 
                 if not self.live:
@@ -209,10 +220,14 @@ class PreviewWorker(QRunnable):
 
             # โหมดปกติ: AFTER อย่างเดียว
             # โหมดปกติ: AFTER อย่างเดียว
-            # src01 = base.astype(np.float32)/255.0
             # out01 = pipeline(src01, self.adj, fast_mode=self.live)
             # out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
-            out = process_image_fast(base, self.adj, fast_mode=self.live)
+            
+            is_fast = self.live
+            if self.long_edge >= 900 and not self.low_spec:
+                is_fast = False
+
+            out = process_image_fast(base, self.adj, fast_mode=is_fast)
             out = apply_transforms(out, self.adj)
             
             # Apply sharpening in live mode too

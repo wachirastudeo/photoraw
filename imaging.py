@@ -100,6 +100,66 @@ def auto_white_balance(rgb):
     
     return float(temperature), float(tint)
 
+def auto_exposure(rgb):
+    """
+    Calculate auto exposure correction using histogram analysis.
+    Returns exposure adjustment value (-3.0 to +3.0 EV).
+    """
+    # Calculate luminance
+    lum = rgb_to_lum(rgb)
+    
+    # Target: midtones should be around 0.18 (middle gray in linear space)
+    # or 0.45 in gamma-corrected space
+    TARGET_MIDTONE = 0.45
+    
+    # Calculate histogram to analyze distribution
+    # Exclude very dark and very bright pixels (likely clipped)
+    valid_mask = (lum > 0.02) & (lum < 0.98)
+    
+    if not np.any(valid_mask):
+        return 0.0
+    
+    valid_lum = lum[valid_mask]
+    
+    # Calculate key metrics
+    mean_lum = np.mean(valid_lum)
+    median_lum = np.median(valid_lum)
+    
+    # Use weighted average of mean and median (median is more robust to outliers)
+    current_midtone = 0.3 * mean_lum + 0.7 * median_lum
+    
+    if current_midtone < 0.01:
+        current_midtone = 0.01
+    
+    # Calculate exposure adjustment needed
+    # exposure = log2(target / current)
+    exposure_ev = np.log2(TARGET_MIDTONE / current_midtone)
+    
+    # Check for highlight/shadow clipping risk
+    p95 = np.percentile(valid_lum, 95)  # Highlight threshold
+    p5 = np.percentile(valid_lum, 5)    # Shadow threshold
+    
+    # Limit exposure if it would blow highlights
+    if exposure_ev > 0:
+        # Positive exposure - check highlights
+        predicted_highlight = p95 * (2 ** exposure_ev)
+        if predicted_highlight > 0.95:
+            # Reduce exposure to protect highlights
+            max_safe_ev = np.log2(0.95 / (p95 + 0.001))
+            exposure_ev = min(exposure_ev, max(0, max_safe_ev))
+    else:
+        # Negative exposure - check shadows
+        predicted_shadow = p5 * (2 ** exposure_ev)
+        if predicted_shadow < 0.03:
+            # Limit how much we darken
+            exposure_ev = max(exposure_ev, -2.0)
+    
+    # Clamp to reasonable range
+    exposure_ev = float(np.clip(exposure_ev, -3.0, 3.0))
+    
+    return exposure_ev
+
+
 def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
     # Skip if no adjustments
     if abs(hi) < 1e-6 and abs(sh) < 1e-6 and abs(wh) < 1e-6 and abs(bl) < 1e-6:
@@ -376,18 +436,25 @@ def apply_mid_contrast(rgb, amount=0.0):
     return clamp01(t)
 
 def apply_clarity(rgb, amount=0.0):
+    """Local contrast enhancement using scipy (fast)"""
     if abs(amount)<1e-6: return rgb
-    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
-    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
-    return clamp01(rgb+(rgb-blur)*(0.45*amount))
+    from scipy.ndimage import uniform_filter
+    # Apply 3x3 box blur using scipy (much faster than manual padding)
+    blur = np.empty_like(rgb)
+    for c in range(3):
+        blur[..., c] = uniform_filter(rgb[..., c], size=3, mode='nearest')
+    return clamp01(rgb + (rgb - blur) * (0.45 * amount))
 
 def apply_texture(rgb, amount=0.0):
-    """เพิ่มคอนทราสต์รายละเอียดขนาดเล็ก (high-pass)"""
+    """High-frequency detail enhancement using scipy (fast)"""
     if abs(amount)<1e-6: return rgb
-    pad=np.pad(rgb,((1,1),(1,1),(0,0)),mode='edge')
-    blur=(pad[:-2,:-2]+pad[:-2,1:-1]+pad[:-2,2:]+pad[1:-1,:-2]+pad[1:-1,1:-1]+pad[1:-1,2:]+pad[2:,:-2]+pad[2:,1:-1]+pad[2:,2:])/9.0
-    high=rgb-blur
-    return clamp01(rgb + high*(0.8*amount))
+    from scipy.ndimage import uniform_filter
+    # Apply 3x3 box blur using scipy
+    blur = np.empty_like(rgb)
+    for c in range(3):
+        blur[..., c] = uniform_filter(rgb[..., c], size=3, mode='nearest')
+    high = rgb - blur
+    return clamp01(rgb + high * (0.8 * amount))
 
 def rgb_to_hsv(rgb):
     r,g,b=rgb[...,0],rgb[...,1],rgb[...,2]

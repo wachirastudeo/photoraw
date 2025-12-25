@@ -14,7 +14,7 @@ from catalog import load_catalog, save_catalog, DEFAULT_ROOT, load_projects_meta
 from imaging import DEFAULTS
 from PySide6.QtCore import QEvent, QPoint, QPointF
 from workers import DecodeWorker, PreviewWorker, ExportWorker
-from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout, create_app_icon
+from ui_helpers import add_slider, create_chip, create_filmstrip, filmstrip_add_item, badge_star, qimage_from_u8, FlowLayout, create_app_icon, LoadingOverlay
 from export_dialog import ExportOptionsDialog
 from cropper import CropDialog
 from library_view import LibraryView
@@ -40,6 +40,10 @@ class Main(QMainWindow):
             QApplication.setWindowIcon(app_icon)
         
         self.resize(1400, 900)
+        
+        # --- Loading Overlay ---
+        self.loading_overlay = LoadingOverlay(self)
+        self.loading_overlay.setVisible(False)
         
         # --- Initialize Project BEFORE creating UI ---
         self._apply_app_theme()
@@ -108,7 +112,9 @@ class Main(QMainWindow):
         # 3. Common Actions (Import, Delete - useful in both)
         btnImport = QPushButton("Import"); btnImport.setToolTip("Import Images"); btnImport.clicked.connect(self.import_images)
         btnDelete = QPushButton("Delete"); btnDelete.clicked.connect(self.delete_selected)
-        btnStarRow = QPushButton("Star ★"); btnStarRow.setCheckable(False); btnStarRow.clicked.connect(self.toggle_star_selected)
+        btnImport = QPushButton("Import"); btnImport.setToolTip("Import Images"); btnImport.clicked.connect(self.import_images)
+        btnDelete = QPushButton("Delete"); btnDelete.clicked.connect(self.delete_selected)
+        self.btnFilterStar = QPushButton("Filter ★"); self.btnFilterStar.setCheckable(True); self.btnFilterStar.clicked.connect(self.toggle_filter_star_btn)
         
         # Select All / None (Added here as requested)
         btnSelAll = QPushButton("All ☑"); btnSelAll.setToolTip("Select All Items")
@@ -117,12 +123,12 @@ class Main(QMainWindow):
         btnSelNone = QPushButton("None ☐"); btnSelNone.setToolTip("Unselect All Items")
         btnSelNone.clicked.connect(lambda: hasattr(self, 'library_view') and self.stack.currentIndex() == 0 and self.library_view.set_all_checked(False))
 
-        row1.addWidget(btnImport); row1.addWidget(btnDelete); row1.addWidget(btnStarRow)
+        row1.addWidget(btnImport); row1.addWidget(btnDelete); row1.addWidget(self.btnFilterStar)
         row1.addWidget(btnSelAll); row1.addWidget(btnSelNone)
         
         # Sort
         row1.addWidget(QLabel("Sort:"))
-        self.cmbSort = QComboBox(); self.cmbSort.addItems(["Name", "Date (Newest)", "Date (Oldest)", "Star"])
+        self.cmbSort = QComboBox(); self.cmbSort.addItems(["Name", "Date (Newest)", "Date (Oldest)", "Rating"])
         self.cmbSort.currentTextChanged.connect(self.sort_items)
         row1.addWidget(self.cmbSort)
         
@@ -149,7 +155,9 @@ class Main(QMainWindow):
         
         vc_layout.addWidget(QLabel("  Filter:"))
         self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred", "Checked"])
-        self.filterBox.currentTextChanged.connect(self.apply_filter)
+        vc_layout.addWidget(QLabel("  Filter:"))
+        self.filterBox=QComboBox(); self.filterBox.addItems(["All","Starred", "Checked"])
+        self.filterBox.currentTextChanged.connect(self._sync_filter_buttons)
         vc_layout.addWidget(self.filterBox)
 
         # Preview Settings
@@ -213,11 +221,10 @@ class Main(QMainWindow):
         row2 = QHBoxLayout()
         row2.setSpacing(6)
         
-        # Edit
+        # Edit (Undo/Redo)
         btnUndo = QPushButton("Undo"); btnUndo.clicked.connect(self.undo_last)
         btnRedo = QPushButton("Redo"); btnRedo.clicked.connect(self.redo_last)
-        btnReset = QPushButton("Reset All"); btnReset.clicked.connect(self.reset_all_settings)
-        row2.addWidget(btnUndo); row2.addWidget(btnRedo); row2.addWidget(btnReset)
+        row2.addWidget(btnUndo); row2.addWidget(btnRedo)
         
         # Copy/Paste
         btnCopy = QPushButton("Copy"); btnCopy.setToolTip("Copy Settings"); btnCopy.clicked.connect(self.copy_settings)
@@ -225,11 +232,13 @@ class Main(QMainWindow):
         row2.addWidget(btnCopy); row2.addWidget(btnPaste)
         
         # Tools (Icons)
-        btnRotL=QToolButton(); btnRotL.setText("⟲"); btnRotL.setToolTip("Rotate Left"); btnRotL.clicked.connect(lambda: self.bump_rotate(-90))
-        btnRotR=QToolButton(); btnRotR.setText("⟳"); btnRotR.setToolTip("Rotate Right"); btnRotR.clicked.connect(lambda: self.bump_rotate(+90))
+        # Rotate Left = หัวภาพหมุนไปทางซ้าย = clockwise 90° = +90
+        # Rotate Right = หัวภาพหมุนไปทางขวา = counterclockwise 90° = -90
+        btnRotL=QToolButton(); btnRotL.setText("⟲"); btnRotL.setToolTip("Rotate Left (หัวภาพไปซ้าย)"); btnRotL.clicked.connect(lambda: self.bump_rotate(+90))
+        btnRotR=QToolButton(); btnRotR.setText("⟳"); btnRotR.setToolTip("Rotate Right (หัวภาพไปขวา)"); btnRotR.clicked.connect(lambda: self.bump_rotate(-90))
         btnFlip=QToolButton(); btnFlip.setText("↔"); btnFlip.setToolTip("Flip Horizontal"); btnFlip.clicked.connect(self.toggle_flip_h)
         btnCrop=QPushButton("Crop"); btnCrop.clicked.connect(self.do_crop_dialog)
-        btnStar=QPushButton("★ Star"); btnStar.clicked.connect(self.toggle_star_selected)
+        btnStar=QPushButton("Mark ★"); btnStar.clicked.connect(self.toggle_star_selected)
         
         row2.addWidget(btnRotL); row2.addWidget(btnRotR); row2.addWidget(btnFlip); row2.addWidget(btnCrop)
         row2.addWidget(btnStar)
@@ -241,6 +250,11 @@ class Main(QMainWindow):
         btnExpStar = QPushButton("Export Starred ★"); btnExpStar.clicked.connect(self.export_starred)
         btnExpAll = QPushButton("Export All"); btnExpAll.clicked.connect(self.export_all)
         row2.addWidget(btnExpSel); row2.addWidget(btnExpStar); row2.addWidget(btnExpAll)
+        
+        # Reset All (rightmost)
+        btnReset = QPushButton("Reset All"); btnReset.clicked.connect(self.reset_all_settings)
+        btnReset.setStyleSheet("QPushButton { color: #ff6b6b; }")  # Red text for visibility
+        row2.addWidget(btnReset)
         
 
 
@@ -375,7 +389,10 @@ class Main(QMainWindow):
         # Python allows calling methods defined later.
         self.mode_library()
 
-        self.showMaximized()
+        self.mode_library()
+
+        # if not self.splash:
+        #     self.showMaximized()
 
     # ------- groups -------
     def group_info(self):
@@ -485,7 +502,18 @@ class Main(QMainWindow):
         g=QGroupBox("Basic"); f=QFormLayout(g)
         from imaging import DEFAULTS
         
-        # Original Basic controls
+        # Exposure header with Auto toggle button
+        exp_header = QHBoxLayout()
+        exp_header.addWidget(QLabel("<b>Exposure</b>"))
+        exp_header.addStretch(1)
+        self.btn_auto_exp = QPushButton("Auto")
+        self.btn_auto_exp.setToolTip("Toggle Auto Exposure")
+        self.btn_auto_exp.setCheckable(True)
+        self.btn_auto_exp.toggled.connect(self.toggle_auto_exposure)
+        exp_header.addWidget(self.btn_auto_exp)
+        f.addRow(exp_header)
+        
+        # Exposure, Contrast, Gamma sliders
         for k,conf in [("exposure",(-3,3,0.01)),("contrast",(-1,1,0.01)),("gamma",(0.3,2.2,0.01))]:
             s,l=add_slider(f, QLabel(k.capitalize()),k,conf[0],conf[1],DEFAULTS[k],conf[2],
                             on_change=self.on_change,on_reset=self.on_reset_one,
@@ -495,15 +523,16 @@ class Main(QMainWindow):
         # Add separator
         f.addRow(QLabel(""))
         
-        # White Balance controls (moved from Color tab)
+        # White Balance controls with Auto toggle button
         wb_layout = QHBoxLayout()
         wb_label = QLabel("<b>White Balance</b>")
-        btn_auto_wb = QPushButton("Auto WB")
-        btn_auto_wb.setToolTip("Auto White Balance")
-        btn_auto_wb.clicked.connect(self.apply_auto_white_balance)
+        self.btn_auto_wb = QPushButton("Auto WB")
+        self.btn_auto_wb.setToolTip("Toggle Auto White Balance")
+        self.btn_auto_wb.setCheckable(True)
+        self.btn_auto_wb.toggled.connect(self.toggle_auto_white_balance)
         wb_layout.addWidget(wb_label)
         wb_layout.addStretch(1)
-        wb_layout.addWidget(btn_auto_wb)
+        wb_layout.addWidget(self.btn_auto_wb)
         f.addRow(wb_layout)
         
         for k,lab in [("temperature","Temperature"),("tint","Tint")]:
@@ -533,23 +562,12 @@ class Main(QMainWindow):
                        on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
         self.sliders["dehaze"]={"s":s,"l":l,"step":0.01}
         
-        # Add separator
-        f.addRow(QLabel(""))
-        
-        # Transform controls (Angle for straightening)
-        f.addRow(QLabel("<b>Transform</b>"))
-        s,l=add_slider(f, QLabel("Angle"), "angle", -10.0,10.0,DEFAULTS["angle"],0.1,
-                       on_change=self.on_change,on_reset=self.on_reset_one,
-                       on_press=self._on_slider_drag_start,on_release=self._on_slider_drag_end)
-        self.sliders["angle"]={"s":s,"l":l,"step":0.1}
-        
-        # Reset button for all Basic + White Balance + Tone + Transform controls
+        # Reset button for all Basic + White Balance + Tone controls
         btn = QPushButton("Reset Basic")
         btn.clicked.connect(lambda: self.reset_tab_settings([
             "exposure", "contrast", "gamma", 
             "temperature", "tint",
-            "highlights", "shadows", "whites", "blacks", "mid_contrast", "dehaze",
-            "angle"
+            "highlights", "shadows", "whites", "blacks", "mid_contrast", "dehaze"
         ]))
         f.addRow(btn)
         
@@ -959,6 +977,116 @@ class Main(QMainWindow):
         self._kick_preview_thread(force=True)
         self.update_status("Auto White Balance applied")
 
+    def toggle_auto_exposure(self, checked):
+        """Toggle automatic exposure correction"""
+        if self.current < 0:
+            if hasattr(self, 'btn_auto_exp'):
+                self.btn_auto_exp.setChecked(False)
+            return
+        
+        it = self.items[self.current]
+        if it["full"] is None:
+            if hasattr(self, 'btn_auto_exp'):
+                self.btn_auto_exp.setChecked(False)
+            return
+        
+        # Save current state for undo
+        self._push_undo(it)
+        self.redo_stack.get(it["name"], []).clear()
+        
+        if checked:
+            # Save backup of current exposure before applying auto
+            if "_backup_exposure" not in it:
+                it["_backup_exposure"] = it["settings"].get("exposure", 0.0)
+            
+            # Convert image to float for processing
+            if it["full"].dtype == np.uint16:
+                rgb_float = it["full"].astype(np.float32) / 65535.0
+            else:
+                rgb_float = it["full"].astype(np.float32) / 255.0
+            
+            # Calculate auto exposure
+            from imaging import auto_exposure
+            exposure_ev = auto_exposure(rgb_float)
+            
+            # Apply the calculated value
+            it["settings"]["exposure"] = exposure_ev
+            self.update_status(f"Auto Exposure ON: {exposure_ev:+.2f} EV")
+        else:
+            # Restore backup value
+            backup = it.pop("_backup_exposure", 0.0)
+            it["settings"]["exposure"] = backup
+            self.update_status("Auto Exposure OFF")
+        
+        # Update UI slider
+        exp_val = it["settings"]["exposure"]
+        if "exposure" in self.sliders:
+            self.sliders["exposure"]["s"].setValue(int(exp_val * 100))
+            self.sliders["exposure"]["l"].setText(f"{exp_val:.2f}")
+        
+        # Update preview
+        self._persist_current_item()
+        self._kick_preview_thread(force=True)
+
+    def toggle_auto_white_balance(self, checked):
+        """Toggle automatic white balance"""
+        if self.current < 0:
+            if hasattr(self, 'btn_auto_wb'):
+                self.btn_auto_wb.setChecked(False)
+            return
+        
+        it = self.items[self.current]
+        if it["full"] is None:
+            if hasattr(self, 'btn_auto_wb'):
+                self.btn_auto_wb.setChecked(False)
+            return
+        
+        # Save current state for undo
+        self._push_undo(it)
+        self.redo_stack.get(it["name"], []).clear()
+        
+        if checked:
+            # Save backup before applying auto
+            if "_backup_temperature" not in it:
+                it["_backup_temperature"] = it["settings"].get("temperature", 0.0)
+                it["_backup_tint"] = it["settings"].get("tint", 0.0)
+            
+            # Convert image to float for processing
+            if it["full"].dtype == np.uint16:
+                rgb_float = it["full"].astype(np.float32) / 65535.0
+            else:
+                rgb_float = it["full"].astype(np.float32) / 255.0
+            
+            # Calculate auto white balance
+            from imaging import auto_white_balance
+            temperature, tint = auto_white_balance(rgb_float)
+            
+            # Apply the calculated values
+            it["settings"]["temperature"] = temperature
+            it["settings"]["tint"] = tint
+            self.update_status("Auto White Balance ON")
+        else:
+            # Restore backup values
+            backup_temp = it.pop("_backup_temperature", 0.0)
+            backup_tint = it.pop("_backup_tint", 0.0)
+            it["settings"]["temperature"] = backup_temp
+            it["settings"]["tint"] = backup_tint
+            self.update_status("Auto White Balance OFF")
+        
+        # Update UI sliders
+        temp_val = it["settings"]["temperature"]
+        tint_val = it["settings"]["tint"]
+        if "temperature" in self.sliders:
+            self.sliders["temperature"]["s"].setValue(int(temp_val * 100))
+            self.sliders["temperature"]["l"].setText(f"{temp_val:.2f}")
+        if "tint" in self.sliders:
+            self.sliders["tint"]["s"].setValue(int(tint_val * 100))
+            self.sliders["tint"]["l"].setText(f"{tint_val:.2f}")
+        
+        # Update preview
+        self._persist_current_item()
+        self._kick_preview_thread(force=True)
+
     def reset_all_settings(self):
         if self.current < 0:
             QMessageBox.information(self, "Info", "No image selected")
@@ -1010,9 +1138,8 @@ class Main(QMainWindow):
         it=self.items[self.current]
         if it["full"] is None: return
 
-        # สร้างภาพพรีวิวสำหรับ Crop โดยเฉพาะ
+        # สร้างภาพพรีวิวสำหรับ Crop & Straighten
         # ต้องเป็นภาพที่ "แต่งสีแล้ว" แต่ "ยังไม่ transform" (crop/rotate/flip)
-        # เพื่อให้ผู้ใช้เห็นภาพที่ถูกต้องและ Crop บนภาพนั้นได้
         from imaging import pipeline
         from ui_helpers import qimage_from_u8
 
@@ -1030,13 +1157,24 @@ class Main(QMainWindow):
         after_u8 = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
         pix = QPixmap.fromImage(qimage_from_u8(after_u8))
 
-        dlg = CropDialog(pix, self)
+        # Get current angle for straighten
+        current_angle = float(it["settings"].get("angle", 0.0))
+        
+        # Open Crop & Straighten dialog with current angle
+        dlg = CropDialog(pix, self, initial_angle=current_angle)
         if dlg.exec():
             crop_norm = dlg.get_normalized_crop()
+            new_angle = dlg.get_angle()
+            
+            # Update angle setting
+            it["settings"]["angle"] = new_angle
+            
+            # Update crop if valid
             if crop_norm:
                 it["settings"]["crop"] = crop_norm
-                self._persist_current_item()
-                self._kick_preview_thread(force=True)
+            
+            self._persist_current_item()
+            self._kick_preview_thread(force=True)
         # หมายเหตุ: crop ที่เก็บเป็น normalized จะใช้กับไฟล์ต้นฉบับตอน export ด้วย
 
     # ------- change events -------
@@ -1047,18 +1185,17 @@ class Main(QMainWindow):
         self.redo_stack.get(it["name"], []).clear()
         it["settings"][key]=float(value)
         
-        # Balanced approach:
-        # - Fast Mode: instant update (no debounce)
-        # - Normal Mode: small debounce to reduce CPU while staying responsive
+        # Fast response with minimal debounce
         if self.live_dragging:
             if hasattr(self, "btn_low_spec") and self.btn_low_spec.isChecked():
                 # Fast Mode: instant update
                 self._kick_preview_thread()
             else:
-                # Normal Mode: small debounce for smoothness
-                self.debounce.start(50)
+                # Normal Mode: very short debounce (30ms)
+                self.debounce.start(30)
         else:
-            self.debounce.start(100)
+            # After release: quick update (50ms)
+            self.debounce.start(50)
         self._persist_current_item()
 
     def _debounced_actions(self):
@@ -1180,8 +1317,21 @@ class Main(QMainWindow):
             self.loaded+=1; self.update_status()
 
     def update_status(self, extra=""):
-        if self.to_load>0 and self.loaded<self.to_load: self.status.setText(f"Loading... {self.loaded}/{self.to_load} {extra}")
-        else: self.status.setText(extra if extra else "Ready")
+        if self.to_load>0 and self.loaded<self.to_load:
+            msg = f"Loading... {self.loaded}/{self.to_load} {extra}"
+            self.status.setText(msg)
+            if self.loading_overlay.isVisible():
+                pct = int(self.loaded*100/self.to_load) if self.to_load else 0
+                self.loading_overlay.update_progress(msg, pct)
+        else:
+            self.status.setText(extra if extra else "Ready")
+            if self.loading_overlay.isVisible():
+                self.loading_overlay.setVisible(False)
+
+    def _on_decode_error(self, message):
+        print(f"Error loading: {message}")
+        self.loaded += 1
+        self.update_status()
     # ------- selection / star / filter / delete -------
     def on_select_item(self, force_row=None):
         """Handle item selection from filmstrip.
@@ -1916,9 +2066,13 @@ class Main(QMainWindow):
         if self.live_dragging:
             if self.live_inflight:
                 return
-            # Only reduce size if Fast Mode is enabled
+            # ALWAYS reduce preview size during live drag for smooth response, UNLESS user wants high quality (>=900)
             if hasattr(self, "btn_low_spec") and self.btn_low_spec.isChecked():
-                use_edge = 240  # Fast Mode: very small for speed
+                use_edge = 240  # Fast Mode: super small
+            elif long_edge >= 900:
+                use_edge = long_edge # Keep full resolution for high quality preview settings
+            else:
+                use_edge = min(use_edge, 480)  # Normal Mode: cap at 480px for speed
 
         base_override = None
         cache = it.setdefault("preview_cache", {})
@@ -2429,7 +2583,16 @@ class Main(QMainWindow):
         """Restore images from the current project's catalog"""
         image_files = [k for k in self.catalog.keys() if not k.startswith("__")]
         existing_files = []
-        for k in image_files:
+        total_scan = len(image_files)
+        
+        if total_scan > 0:
+            self.loading_overlay.setVisible(True)
+            self.loading_overlay.raise_()
+            self._center_loading_overlay()
+
+        for i, k in enumerate(image_files):
+            if i % 50 == 0:
+                self.loading_overlay.update_progress(f"Scanning project files {i}/{total_scan}...", int(i*90/max(1, total_scan)))
             try:
                 if Path(k).exists():
                     existing_files.append(k)
@@ -2437,6 +2600,11 @@ class Main(QMainWindow):
                 pass
         
         if existing_files:
+            self.loading_overlay.setVisible(True)
+            self.loading_overlay.raise_()
+            self._center_loading_overlay()
+            self.loading_overlay.progress.setRange(0, 100)
+                
             self.to_load = len(existing_files)
             self.loaded = 0
             self.update_status(f"Restoring {len(existing_files)} images...")
@@ -2455,8 +2623,10 @@ class Main(QMainWindow):
                 
                 w = DecodeWorker(p, thumb_w=256, thumb_h=170)
                 w.signals.done.connect(self._on_decoded)
-                w.signals.error.connect(lambda m: print(f"Error loading: {m}"))
+                w.signals.error.connect(self._on_decode_error)
                 self.pool.start(w)
+        else:
+            self.loading_overlay.setVisible(False)
 
 
 
@@ -2514,6 +2684,21 @@ class Main(QMainWindow):
         edit_menu.addAction(action_redo)
         
         edit_menu.addSeparator()
+
+    def toggle_filter_star_btn(self, checked):
+        # Button toggled -> update Combo
+        if checked:
+            self.filterBox.setCurrentText("Starred")
+        else:
+            self.filterBox.setCurrentText("All")
+            
+    def _sync_filter_buttons(self, text):
+        # Combo changed -> update Button and Apply
+        was_blocked = self.btnFilterStar.signalsBlocked()
+        self.btnFilterStar.blockSignals(True)
+        self.btnFilterStar.setChecked(text == "Starred")
+        self.btnFilterStar.blockSignals(was_blocked)
+        self.apply_filter(text)
         
         action_copy = QAction("Copy Settings", self)
         action_copy.setShortcut(QKeySequence.Copy)
@@ -2580,30 +2765,35 @@ class Main(QMainWindow):
         
         # Header
         header = QLabel("Select a project:")
-        header.setStyleSheet("font-size: 13px; font-weight: bold; padding: 4px;")
+        header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 4px; color: #a1a1aa;")
         layout.addWidget(header)
         
         # Project list
         list_widget = QListWidget()
         list_widget.setStyleSheet("""
             QListWidget {
-                background: #27272a;
+                background: #18181b;
                 border: 1px solid #3f3f46;
-                border-radius: 6px;
+                border-radius: 8px;
+                outline: none;
                 padding: 4px;
             }
             QListWidget::item {
-                padding: 10px;
-                margin: 2px;
-                border-radius: 4px;
-                border-bottom: 1px solid #3f3f46;
+                padding: 12px;
+                margin: 4px;
+                border: 1px solid #27272a;
+                border-radius: 6px;
+                background: #27272a;
+                color: #f4f4f5;
             }
             QListWidget::item:selected {
-                background: #4f46e5;
+                background: #3730a3;
+                border: 1px solid #4f46e5;
                 color: white;
             }
             QListWidget::item:hover:!selected {
                 background: #3f3f46;
+                border: 1px solid #52525b;
             }
         """)
         
@@ -2633,9 +2823,17 @@ class Main(QMainWindow):
                     except:
                         pass
                 
-                # Use simple text without emoji for better compatibility
-                item_text = f"{display_name}\n  Path: {proj_path}\n  Last used: {last_used}"
-                item = QListWidgetItem(item_text)
+                # Use pretty text formatting
+                # Note: QListWidgetItem doesn't support HTML directly easily without a custom widget delegate,
+                # but we can make it look decent with spacing.
+                import datetime
+                last_used_str = f"Last used: {last_used}"
+                
+                # We can't do rich text easily in standard QListWidgetItem without custom delegate
+                # So we stick to text but improve formatting
+                item = QListWidgetItem()
+                # Store display data in user roles for sorting/filtering if needed
+                item.setText(f"{display_name}\n  📂 {proj_path}\n  🕒 {last_used_str}")
                 item.setData(Qt.UserRole, proj_path)
                 list_widget.addItem(item)
         
@@ -2670,10 +2868,26 @@ class Main(QMainWindow):
         list_widget.customContextMenuRequested.connect(on_context_menu)
         
         # Buttons
+        # Style buttons common
+        btn_style = """
+            QPushButton {
+                background:#3f3f46; border:1px solid #52525b; border-radius:6px; padding:8px 16px; color:#f4f4f5; font-weight:500;
+            }
+            QPushButton:hover { background:#52525b; border-color:#71717a; }
+            QPushButton:pressed { background:#27272a; }
+        """
+        btn_primary_style = """
+            QPushButton {
+                background:#4f46e5; border:1px solid #4338ca; border-radius:6px; padding:8px 16px; color:white; font-weight:600;
+            }
+            QPushButton:hover { background:#4338ca; border-color:#3730a3; }
+            QPushButton:pressed { background:#312e81; }
+        """
+        
         btn_layout1 = QHBoxLayout()
-        btn_rename = QPushButton("Rename")
-        btn_delete = QPushButton("Delete")
-        btn_browse = QPushButton("Browse...")
+        btn_rename = QPushButton("Rename"); btn_rename.setStyleSheet(btn_style)
+        btn_delete = QPushButton("Delete"); btn_delete.setStyleSheet(btn_style)
+        btn_browse = QPushButton("Browse..."); btn_browse.setStyleSheet(btn_style)
         
         btn_layout1.addWidget(btn_rename)
         btn_layout1.addWidget(btn_delete)
@@ -2682,13 +2896,13 @@ class Main(QMainWindow):
         layout.addLayout(btn_layout1)
         
         btn_layout2 = QHBoxLayout()
-        btn_ok = QPushButton("Open")
-        btn_cancel = QPushButton("Cancel")
+        btn_ok = QPushButton("Open Project"); btn_ok.setStyleSheet(btn_primary_style)
+        btn_cancel = QPushButton("Cancel"); btn_cancel.setStyleSheet(btn_style)
         btn_ok.setDefault(True)
         
         btn_layout2.addStretch()
-        btn_layout2.addWidget(btn_ok)
         btn_layout2.addWidget(btn_cancel)
+        btn_layout2.addWidget(btn_ok) # OK on right usually for Windows, but Mac/Modern web often flips. Let's stick to standard flow: Cancel -> Action
         layout.addLayout(btn_layout2)
         
         # Connect buttons
@@ -2893,7 +3107,7 @@ class Main(QMainWindow):
         elif criteria == "Date (Oldest)":
             key = lambda x: os.path.getmtime(x["name"]) if os.path.exists(x["name"]) else 0
             reverse = False
-        elif criteria == "Star":
+        elif criteria == "Rating":
             key = lambda x: x.get("star", False)
             reverse = True
         else: # Name
@@ -2926,6 +3140,14 @@ class Main(QMainWindow):
         thread.start()
 
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_loading_overlay()
+        
+    def _center_loading_overlay(self):
+        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+            self.loading_overlay.resize(self.size())
+
 if __name__=="__main__":
     # macOS HiDPI / Retina: rely on Qt6 auto scaling, just adjust rounding and layer usage
     if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
@@ -2933,5 +3155,7 @@ if __name__=="__main__":
     # if sys.platform == "darwin":
     #     os.environ.setdefault("QT_MAC_WANTS_LAYER", "1") # This can cause blank screens on some macOS/Qt versions
     app=QApplication(sys.argv)
+    
     w=Main()
+    w.showMaximized()
     sys.exit(app.exec())

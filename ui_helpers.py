@@ -1,7 +1,8 @@
 from PySide6.QtCore import Qt, QSize, QRect, QPoint
 from PySide6.QtWidgets import (
     QFormLayout, QHBoxLayout, QWidget, QFrame, QLabel, QSlider, QToolButton,
-    QListWidget, QListWidgetItem, QAbstractItemView, QLayout, QSizePolicy, QStyle
+    QListWidget, QListWidgetItem, QAbstractItemView, QLayout, QSizePolicy, QStyle,
+    QProgressBar, QVBoxLayout, QApplication
 )
 from PySide6.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QFont, QLinearGradient, QBrush, QPen, QPainterPath
 
@@ -272,3 +273,65 @@ class FlowLayout(QLayout):
             line_height = max(line_height, hint.height())
 
         return y + line_height - rect.y()
+
+class LoadingOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False) # Block mouse events
+        
+        # Main layout for the overlay (centers the box)
+        main_layout = QVBoxLayout(self)
+        main_layout.setAlignment(Qt.AlignCenter)
+        
+        # The box containing the progress
+        container = QFrame()
+        container.setObjectName("LoadingBox")
+        container.setStyleSheet("""
+            #LoadingBox {
+                background: #18181b; 
+                border: 1px solid #3f3f46; 
+                border-radius: 12px;
+            }
+        """)
+        container.setFixedSize(400, 150)
+        
+        # Layout inside the box
+        layout = QVBoxLayout(container)
+        layout.setSpacing(10)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Text
+        self.status = QLabel("Initializing...")
+        self.status.setAlignment(Qt.AlignCenter)
+        self.status.setStyleSheet("font-size: 14px; color: #e4e4e7; border: none; font-weight: bold;")
+        layout.addWidget(self.status)
+        
+        # Progress Bar
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background: #27272a;
+                height: 6px;
+                border-radius: 3px;
+                margin-top: 5px;
+            }
+            QProgressBar::chunk {
+                background: #6366f1;
+                border-radius: 3px;
+            }
+        """)
+        self.progress.setRange(0, 100)
+        layout.addWidget(self.progress)
+        
+        main_layout.addWidget(container)
+        
+        # Semi-transparent background for the whole overlay
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 80);")
+
+    def update_progress(self, message, percent):
+        self.status.setText(message)
+        self.progress.setValue(percent)
+        QApplication.processEvents()
+
