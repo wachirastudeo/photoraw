@@ -184,22 +184,22 @@ def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
         # Apply more gain to darker areas
         rgb = rgb * (1.0 + (lift - 1.0) * shadow_mask[..., None])
 
-    # Highlight Compression (HDR Pullback)
+    # Highlight Compression/Recovery
     if abs(hi) > 1e-6:
-        # Mask for bright areas
-        # Soft transition start at 0.7
+        # Mask for bright areas (affects pixels > 0.5 luminance)
+        # Stronger effect on brighter pixels
         hi_mask = np.clip((y - 0.5) * 2.0, 0, 1) ** 2
         
-        # Compression factor
-        # compress = 1.0 / (1.0 + hi * 2.0)
-        # rgb = rgb * (1.0 - hi_mask[..., None]) + (rgb * compress) * hi_mask[..., None]
-        
-        # New method: Compress HDR highlights (>1.0) back to 1.0 range
-        # If hi=1.0, we aggressively map >1.0 to near 1.0
         if hi > 0:
+            # Positive: Compress/darken highlights (pull back bright areas)
             scale = 1.0 + hi * 3.0
-            # RGB / Scale for highlights
             target = rgb / scale
+            rgb = rgb * (1.0 - hi_mask[..., None]) + target * hi_mask[..., None]
+        else:
+            # Negative: Expand/brighten highlights (boost bright areas)
+            # Make highlights brighter and more detailed
+            boost = 1.0 + abs(hi) * 2.5
+            target = rgb * boost
             rgb = rgb * (1.0 - hi_mask[..., None]) + target * hi_mask[..., None]
 
     # Whites (Point shift)

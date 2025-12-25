@@ -620,7 +620,7 @@ class Main(QMainWindow):
         action_layout = QVBoxLayout(action_wrap); action_layout.setContentsMargins(0,8,0,0); action_layout.setSpacing(6)
         self.lab_active_preset = QLabel("Active preset: None")
         self.lab_active_preset.setStyleSheet("QLabel{padding:6px 8px; background:#312e81; border:1px solid #4338ca; border-radius:6px; color:#e0e7ff;}")
-        self.chk_preset_transform = QCheckBox("Include crop/rotate/flip when applying")
+        self.chk_preset_transform = QCheckBox("Include crop/flip when applying (rotation excluded)")
         action_layout.addWidget(self.lab_active_preset)
         action_layout.addWidget(self.chk_preset_transform)
         btn_row1=QHBoxLayout(); btn_row1.setSpacing(6)
@@ -1519,44 +1519,51 @@ class Main(QMainWindow):
 
     # ------- Presets -------
     def _init_default_presets(self):
-        """Initialize default presets if they don't exist"""
-        changed = False
+        """Initialize default presets - always recreate to ensure latest version"""
         
-        # Remove deprecated presets
-        deprecated = ["Matrix", "Fuji"]
-        for name in deprecated:
-            if name in self.presets:
-                del self.presets[name]
-                changed = True
+        # List of official presets we want to keep
+        official_presets = [
+            "Film", "Kodak Portra 400", "Kodachrome", "Portra",
+            "Portrait", "Portrait Enhancement", "Green Forest",
+            "Bright & Airy", "Cinematic", "Clean Boost", "Cool Matte",
+            "Fuji Velvia 50", "Golden Hour",
+            "Faded B&W", "B&W High Contrast"
+        ]
+        
+        # Remove ALL presets that are not in our official list
+        # This cleans up any old/deprecated presets
+        presets_to_remove = [name for name in list(self.presets.keys()) if name not in official_presets]
+        for name in presets_to_remove:
+            del self.presets[name]
+        
+        # Now recreate all official presets (always update to latest version)
         
         # Portrait Preset - Soft skin, warm tones
-        if "Portrait" not in self.presets:
-            self.presets["Portrait"] = {
-                "exposure": 0.1,
-                "contrast": -0.05,
-                "highlights": 0.15,
-                "shadows": 0.25,
-                "whites": 0.0,
-                "blacks": 0.1,
-                "saturation": -0.1,
-                "vibrance": 0.15,
-                "temperature": 0.15,  # Warm
-                "tint": 0.05,
-                "gamma": 1.0,
-                "clarity": -0.25,  # Soft skin
-                "texture": -0.15,
-                "mid_contrast": 0.0,
-                "dehaze": 0.0,
-                "denoise": 0.3,  # Smooth skin
-                "vignette": 0.15,
-                "defringe": 0.0,
-                "export_sharpen": 0.15,
-                "tone_curve": 0.0,
-                "grain_amount": 0.0,
-                "grain_size": 0.5,
-                "grain_roughness": 0.5,
-            }
-            changed = True
+        self.presets["Portrait"] = {
+            "exposure": 0.1,
+            "contrast": -0.05,
+            "highlights": 0.15,
+            "shadows": 0.25,
+            "whites": 0.0,
+            "blacks": 0.1,
+            "saturation": -0.1,
+            "vibrance": 0.15,
+            "temperature": 0.15,  # Warm
+            "tint": 0.05,
+            "gamma": 1.0,
+            "clarity": -0.25,  # Soft skin
+            "texture": -0.15,
+            "mid_contrast": 0.0,
+            "dehaze": 0.0,
+            "denoise": 0.3,  # Smooth skin
+            "vignette": 0.15,
+            "defringe": 0.0,
+            "export_sharpen": 0.15,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
+        }
         
         # Film Preset - Classic film look (always update to latest version)
         self.presets["Film"] = {
@@ -1612,6 +1619,33 @@ class Main(QMainWindow):
             "grain_roughness": 0.6,
         }
         
+        # Kodak Portra 400 - Low grain film emulation with warm, pastel tones
+        self.presets["Kodak Portra 400"] = {
+            "exposure": 0.15,
+            "contrast": -0.08,
+            "highlights": 0.2,
+            "shadows": 0.3,
+            "whites": 0.05,
+            "blacks": 0.2,  # Lifted blacks for film look
+            "saturation": -0.12,  # Soft pastel colors
+            "vibrance": 0.15,
+            "temperature": 0.12,  # Warm film tones
+            "tint": 0.06,
+            "gamma": 1.0,
+            "clarity": -0.18,  # Soft film rendering
+            "texture": -0.12,
+            "mid_contrast": -0.03,
+            "dehaze": 0.0,
+            "denoise": 0.25,
+            "vignette": 0.12,
+            "defringe": 0.0,
+            "export_sharpen": 0.15,
+            "tone_curve": 0.0,
+            "grain_amount": 0.05,  # Minimal grain
+            "grain_size": 0.18,  # Fine grain
+            "grain_roughness": 0.35,  # Smooth grain
+        }
+        
         # Portra - Soft, pastel, skin-friendly
         self.presets["Portra"] = {
             "exposure": 0.15,
@@ -1639,58 +1673,58 @@ class Main(QMainWindow):
             "grain_roughness": 0.4,
         }
         
-        # Cinematic - Cool tones, moody, teal & orange
-        self.presets["Cinematic"] = {
-            "exposure": -0.05,
-            "contrast": 0.3,
-            "highlights": -0.2,
-            "shadows": 0.15,
-            "whites": -0.1,
-            "blacks": 0.25,  # Lifted blacks for mood
-            "saturation": -0.1,
-            "vibrance": 0.15,
-            "temperature": -0.15,  # Cool/teal
-            "tint": 0.0,
+        # Portrait Enhancement - Beautiful modern portrait preset
+        self.presets["Portrait Enhancement"] = {
+            "exposure": 0.2,
+            "contrast": -0.08,
+            "highlights": 0.25,
+            "shadows": 0.35,
+            "whites": 0.1,
+            "blacks": 0.15,
+            "saturation": -0.05,
+            "vibrance": 0.25,
+            "temperature": 0.18,  # Warm, flattering
+            "tint": 0.08,
             "gamma": 1.0,
-            "clarity": 0.1,
-            "texture": 0.05,
-            "mid_contrast": 0.25,
-            "dehaze": 0.1,
-            "denoise": 0.0,
-            "vignette": 0.35,  # Strong vignette
+            "clarity": -0.3,  # Very smooth skin
+            "texture": -0.2,  # Soft texture
+            "mid_contrast": 0.05,
+            "dehaze": 0.0,
+            "denoise": 0.35,  # Clean skin
+            "vignette": 0.2,
             "defringe": 0.0,
-            "export_sharpen": 0.2,
+            "export_sharpen": 0.12,
             "tone_curve": 0.0,
             "grain_amount": 0.0,
-            "grain_size": 0.18,
-            "grain_roughness": 0.65,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
         }
         
-        # Faded Forest - Muted green, moody, cinematic
-        self.presets["Faded Forest"] = {
-            "exposure": -0.15,  # Darker
-            "contrast": 0.35,  # High contrast
-            "highlights": -0.2,
-            "shadows": 0.25,  # Lifted shadows
-            "whites": -0.1,
-            "blacks": 0.3,  # Lifted blacks (moody)
-            "saturation": -0.35,  # Muted/desaturated
-            "vibrance": -0.05,
-            "temperature": -0.2,  # Cool
-            "tint": -0.1,  # Slight green
+        # Green Forest - Rich green outdoor preset
+        self.presets["Green Forest"] = {
+            "exposure": 0.05,
+            "contrast": 0.15,
+            "highlights": -0.1,
+            "shadows": 0.2,
+            "whites": 0.0,
+            "blacks": 0.05,
+            "saturation": 0.2,  # Enhanced colors
+            "vibrance": 0.3,  # Boost greens
+            "temperature": -0.05,  # Slightly cool
+            "tint": -0.15,  # Green shift
             "gamma": 1.0,
-            "clarity": 0.2,
-            "texture": 0.15,
-            "mid_contrast": 0.2,
-            "dehaze": 0.15,
+            "clarity": 0.15,  # Natural detail
+            "texture": 0.1,
+            "mid_contrast": 0.15,
+            "dehaze": 0.1,
             "denoise": 0.0,
-            "vignette": 0.3,
+            "vignette": 0.1,
             "defringe": 0.0,
             "export_sharpen": 0.2,
             "tone_curve": 0.0,
             "grain_amount": 0.0,
-            "grain_size": 0.15,
-            "grain_roughness": 0.6,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
         }
         
         # Faded B&W - Black & white with lifted blacks
@@ -1720,11 +1754,199 @@ class Main(QMainWindow):
             "grain_roughness": 0.5,
         }
         
-        changed = True
+        # B&W High Contrast - Dramatic black and white
+        self.presets["B&W High Contrast"] = {
+            "exposure": 0.1,
+            "contrast": 0.45,
+            "highlights": -0.2,
+            "shadows": 0.0,
+            "whites": 0.15,
+            "blacks": -0.25,  # Deep blacks
+            "saturation": -1.0,  # Black & white
+            "vibrance": 0.0,
+            "temperature": 0.0,
+            "tint": 0.0,
+            "gamma": 1.0,
+            "clarity": 0.3,
+            "texture": 0.2,
+            "mid_contrast": 0.3,
+            "dehaze": 0.15,
+            "denoise": 0.0,
+            "vignette": 0.2,
+            "defringe": 0.0,
+            "export_sharpen": 0.25,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.25,
+            "grain_roughness": 0.6,
+        }
         
-        if changed:
-            self.catalog["__presets__"] = self.presets
-            save_catalog(self.catalog, self.project_dir)
+        # Bright & Airy - Light, airy, lifted blacks
+        self.presets["Bright & Airy"] = {
+            "exposure": 0.25,
+            "contrast": -0.15,
+            "highlights": 0.1,
+            "shadows": 0.4,
+            "whites": 0.15,
+            "blacks": 0.4,  # Very lifted blacks
+            "saturation": -0.2,
+            "vibrance": 0.1,
+            "temperature": 0.1,
+            "tint": 0.0,
+            "gamma": 1.0,
+            "clarity": -0.1,
+            "texture": -0.05,
+            "mid_contrast": -0.1,
+            "dehaze": -0.1,
+            "denoise": 0.15,
+            "vignette": 0.0,
+            "defringe": 0.0,
+            "export_sharpen": 0.15,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
+        }
+        
+        # Cinematic - Moody, desaturated, teal and orange
+        self.presets["Cinematic"] = {
+            "exposure": 0.0,
+            "contrast": 0.25,
+            "highlights": -0.15,
+            "shadows": 0.1,
+            "whites": -0.05,
+            "blacks": 0.2,  # Lifted blacks
+            "saturation": -0.3,
+            "vibrance": 0.15,
+            "temperature": 0.05,
+            "tint": -0.1,  # Teal shift
+            "gamma": 1.0,
+            "clarity": 0.2,
+            "texture": 0.1,
+            "mid_contrast": 0.2,
+            "dehaze": 0.1,
+            "denoise": 0.0,
+            "vignette": 0.3,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.1,
+            "grain_size": 0.3,
+            "grain_roughness": 0.6,
+        }
+        
+        # Clean Boost - Natural enhancement
+        self.presets["Clean Boost"] = {
+            "exposure": 0.1,
+            "contrast": 0.1,
+            "highlights": -0.05,
+            "shadows": 0.15,
+            "whites": 0.05,
+            "blacks": 0.0,
+            "saturation": 0.1,
+            "vibrance": 0.2,
+            "temperature": 0.0,
+            "tint": 0.0,
+            "gamma": 1.0,
+            "clarity": 0.15,
+            "texture": 0.1,
+            "mid_contrast": 0.1,
+            "dehaze": 0.05,
+            "denoise": 0.1,
+            "vignette": 0.0,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
+        }
+        
+        # Cool Matte - Cool tones, muted colors
+        self.presets["Cool Matte"] = {
+            "exposure": 0.05,
+            "contrast": 0.1,
+            "highlights": 0.0,
+            "shadows": 0.2,
+            "whites": 0.0,
+            "blacks": 0.25,  # Lifted blacks for matte look
+            "saturation": -0.25,
+            "vibrance": 0.0,
+            "temperature": -0.15,  # Cool
+            "tint": 0.05,
+            "gamma": 1.0,
+            "clarity": 0.0,
+            "texture": 0.0,
+            "mid_contrast": 0.15,
+            "dehaze": 0.0,
+            "denoise": 0.1,
+            "vignette": 0.15,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.05,
+            "grain_size": 0.25,
+            "grain_roughness": 0.5,
+        }
+        
+        # Fuji Velvia 50 - Ultra vibrant, contrasty landscape film
+        self.presets["Fuji Velvia 50"] = {
+            "exposure": 0.05,
+            "contrast": 0.4,
+            "highlights": -0.1,
+            "shadows": 0.05,
+            "whites": 0.1,
+            "blacks": -0.15,
+            "saturation": 0.5,  # Very saturated
+            "vibrance": 0.3,
+            "temperature": 0.0,
+            "tint": -0.05,
+            "gamma": 1.0,
+            "clarity": 0.25,
+            "texture": 0.2,
+            "mid_contrast": 0.25,
+            "dehaze": 0.1,
+            "denoise": 0.0,
+            "vignette": 0.15,
+            "defringe": 0.0,
+            "export_sharpen": 0.3,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.15,
+            "grain_roughness": 0.5,
+        }
+        
+        # Golden Hour - Warm, glowing sunset tones
+        self.presets["Golden Hour"] = {
+            "exposure": 0.15,
+            "contrast": 0.1,
+            "highlights": -0.05,
+            "shadows": 0.2,
+            "whites": 0.1,
+            "blacks": 0.1,
+            "saturation": 0.15,
+            "vibrance": 0.25,
+            "temperature": 0.35,  # Very warm
+            "tint": 0.1,
+            "gamma": 1.0,
+            "clarity": 0.1,
+            "texture": 0.05,
+            "mid_contrast": 0.1,
+            "dehaze": -0.05,
+            "denoise": 0.0,
+            "vignette": 0.2,
+            "defringe": 0.0,
+            "export_sharpen": 0.2,
+            "tone_curve": 0.0,
+            "grain_amount": 0.0,
+            "grain_size": 0.5,
+            "grain_roughness": 0.5,
+        }
+        
+
+        # Always save catalog after recreating presets
+        self.catalog["__presets__"] = self.presets
+        save_catalog(self.catalog, self.project_dir)
     
     def save_preset_dialog(self):
         if self.current < 0:
@@ -1773,13 +1995,20 @@ class Main(QMainWindow):
         if self.current >= 0:
             it = self.items[self.current]
             if it.get("applied_preset") == preset_name:
-                # Toggle OFF: Reset to defaults but preserve transforms
+                # Toggle OFF: Reset to defaults but preserve rotation, crop, flip_h
                 self._push_undo(it)
                 from imaging import DEFAULTS
-                # Keep crop, rotate, flip_h
-                transforms = {k: it["settings"][k] for k in ("crop", "rotate", "flip_h") if k in it["settings"]}
+                
+                # CRITICAL: Always preserve rotation
+                current_rotate = it["settings"].get("rotate", 0)
+                
+                # Keep crop and flip_h only
+                transforms = {k: it["settings"][k] for k in ("crop", "flip_h") if k in it["settings"]}
                 it["settings"] = DEFAULTS.copy()
                 it["settings"].update(transforms)
+                
+                # Force rotation back
+                it["settings"]["rotate"] = current_rotate
                 it["applied_preset"] = None
                 
                 self._persist_current_item()
@@ -1875,16 +2104,58 @@ class Main(QMainWindow):
     def _apply_preset(self, it, preset, include_transform=False, preset_name=None):
         self._push_undo(it)
         self.redo_stack.get(it.get("name"), []).clear()
-        transforms = {k:it["settings"].get(k) for k in ("crop","rotate","flip_h") if include_transform and k in it["settings"]}
+        
+        # CRITICAL: Always preserve rotation from current settings (NEVER reset it)
+        current_rotate = it["settings"].get("rotate", 0)
+        
+        # Preserve crop and flip_h only if checkbox is checked
+        transforms = {k:it["settings"].get(k) for k in ("crop","flip_h") if include_transform and k in it["settings"]}
+        
+        # Merge: DEFAULTS < preset < transforms, then force rotation back
         it["settings"] = {**DEFAULTS, **preset, **transforms}
+        
+        # Force rotation to stay at current value (never let preset change it)
+        it["settings"]["rotate"] = current_rotate
+        
         if preset_name:
             it["applied_preset"] = preset_name
 
     def _refresh_preset_list(self):
         if not hasattr(self,"lst_presets"): return
         self.lst_presets.clear()
-        for name in sorted(self.presets.keys()):
+        
+        # Custom ordering: Film presets at top, B&W at bottom
+        preset_order = [
+            # Film presets (top)
+            "Film",
+            "Kodak Portra 400",
+            "Kodachrome",
+            "Portra",
+            # Creative/Portrait presets
+            "Portrait",
+            "Portrait Enhancement",
+            "Green Forest",
+            "Bright & Airy",
+            "Cinematic",
+            "Clean Boost",
+            "Cool Matte",
+            "Fuji Velvia 50",
+            "Golden Hour",
+            # Black & White (bottom)
+            "Faded B&W",
+            "B&W High Contrast",
+        ]
+        
+        # Add presets in custom order first
+        for name in preset_order:
+            if name in self.presets:
+                self.lst_presets.addItem(name)
+        
+        # Then add any user-saved presets (alphabetically)
+        user_presets = sorted([name for name in self.presets.keys() if name not in preset_order])
+        for name in user_presets:
             self.lst_presets.addItem(name)
+        
         if self.active_preset:
             matches=self.lst_presets.findItems(self.active_preset, Qt.MatchExactly)
             if matches:
@@ -2198,7 +2469,21 @@ class Main(QMainWindow):
         # Update thumbnail
         if self.current >= 0:
             it = self.items[self.current]
-            thumb_pm = base_pm.scaled(72, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+            # IMPORTANT: If showing before/after split, extract only the edited half for thumbnail
+            # Check if image is split mode (width > height * 2 indicates side-by-side)
+            h, w = arr.shape[:2]
+            if w > h * 1.5:  # Likely a before/after split (width is much larger than height)
+                # Extract right half only (the edited image)
+                mid_x = w // 2
+                thumb_arr = arr[:, mid_x:]  # Right half = edited image
+            else:
+                # Normal image, use as-is
+                thumb_arr = arr
+            
+            # Create thumbnail from edited image only
+            thumb_qimg = qimage_from_u8(thumb_arr)
+            thumb_pm = QPixmap.fromImage(thumb_qimg).scaled(72, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             it["thumb_edited"] = thumb_pm
             
             name = it["name"]
