@@ -1163,19 +1163,52 @@ class Main(QMainWindow):
                             self.library_view.grid.item(last_row).setCheckState(Qt.Unchecked)
             
             if self.current<0 and self.film.count()>0: self.film.setCurrentRow(0)
+            
+            # CRITICAL FIX: If the decoded item is the CURRENT one (selected via library fallback),
+            # we must update the preview now that we have the full image.
+            if idx == self.current:
+                print(f"✅ _on_decoded: Decoded image IS the current one. Kicking preview!")
+                self._kick_preview_thread(force=True)
+                # Also try to sync filmstrip selection if it appeared now
+                if hasattr(self, 'film'):
+                    for r in range(self.film.count()):
+                        if self.film.item(r).data(Qt.UserRole) == self.items[idx]["name"]:
+                             print(f"   Syncing filmstrip row to {r}")
+                             self.film.setCurrentRow(r)
+                             break
+                            
             self.loaded+=1; self.update_status()
 
     def update_status(self, extra=""):
         if self.to_load>0 and self.loaded<self.to_load: self.status.setText(f"Loading... {self.loaded}/{self.to_load} {extra}")
         else: self.status.setText(extra if extra else "Ready")
-
     # ------- selection / star / filter / delete -------
-    def on_select_item(self):
-        rows=self.film.selectedIndexes()
-        if not rows: return
-        row=rows[0].row(); name=self.film.item(row).data(Qt.UserRole)
+    def on_select_item(self, force_row=None):
+        """Handle item selection from filmstrip.
+        
+        Args:
+            force_row: If provided, use this row instead of reading selectedIndexes().
+                       This is used when calling from _on_library_edit to ensure
+                       the correct item is loaded.
+        """
+        if force_row is not None:
+            row = force_row
+            print(f"🎬 on_select_item triggered with force_row: {row}")
+        else:
+            rows=self.film.selectedIndexes()
+            if not rows: return
+            row=rows[0].row()
+            print(f"🎬 on_select_item triggered. Row: {row}")
+        
+        if row < 0 or row >= self.film.count():
+            print(f"❌ on_select_item: Invalid row {row}")
+            return
+            
+        name=self.film.item(row).data(Qt.UserRole)
         self.current=next((i for i,v in enumerate(self.items) if v["name"]==name),-1)
-        if self.current == -1: return
+        if self.current == -1: 
+            print("❌ on_select_item: Current item not found in self.items")
+            return
         
         # Show loading status immediately
         self.update_status("Loading image...")
@@ -1185,6 +1218,8 @@ class Main(QMainWindow):
         self.undo_stack.setdefault(name, [dict(cur_it["settings"])])
         self.redo_stack.setdefault(name, [])
         
+        print(f"   Loading: {name}, Full image present? {cur_it['full'] is not None}")
+
         # Load UI and preview IMMEDIATELY (fast)
         self.load_settings_to_ui()
         self._mark_active_preset(cur_it.get("applied_preset"))
@@ -1274,7 +1309,10 @@ class Main(QMainWindow):
                  # Currently we accept selection loss or we can improve rebuild_filmstrip later.
 
     def apply_filter(self, text):
-        self.view_filter=text; self.rebuild_filmstrip()
+        self.view_filter=text
+        self.rebuild_filmstrip()
+        if hasattr(self, 'library_view'):
+             self._refresh_library_grid()
 
     def _pass_filter(self, it)->bool:
         # User Requirement: If not ticked (checked), do not show in developer mode (Filmstrip)
@@ -1977,6 +2015,7 @@ class Main(QMainWindow):
             self.pan_update_timer.start(16)
 
     def _show_preview_pix(self, arr):
+        print(f"🖼️ _show_preview_pix: Received {arr.shape} array.")
         from ui_helpers import qimage_from_u8, badge_star
         qimg = qimage_from_u8(arr)
         self._last_preview_qimg = qimg
@@ -1984,6 +2023,7 @@ class Main(QMainWindow):
         base_pm = QPixmap.fromImage(qimg)
         pm = base_pm.scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
+        print("   -> Pixmap set to preview label.")
         self.preview.setAlignment(Qt.AlignCenter) # Force re-alignment
         self.live_inflight = False
         
@@ -2758,9 +2798,60 @@ class Main(QMainWindow):
 
     def _on_library_edit(self, index):
         """Called when user double clicks an item in library grid"""
-        if 0 <= index < self.film.count():
-             self.film.setCurrentRow(index)
-             self.mode_develop()
+        # Robust navigation: Match by NAME (Path), not just index
+        if not hasattr(self, 'library_view'): return
+        
+        item = self.library_view.grid.item(index)
+        if not item:
+            print(f"❌ Library edit: No item at index {index}")
+            return
+        
+        name = item.data(Qt.UserRole)
+        print(f"🖱️ Library Double Click: {index} -> {name}")
+        
+        # Find this name in the filmstrip
+        found_idx = -1
+        if hasattr(self, 'film'):
+            for i in range(self.film.count()):
+                film_name = self.film.item(i).data(Qt.UserRole)
+                if film_name == name:
+                    found_idx = i
+                    break
+        
+        self.mode_develop() # Switch FIRST to ensure widget is visible
+        
+        if found_idx >= 0:
+            print(f"✅ Found in filmstrip at {found_idx}. Switching...")
+            
+            # ALWAYS set the row and then ALWAYS force on_select_item
+            # This fixes the "first click" problem where no selection exists yet
+            self.film.blockSignals(True)
+            self.film.setCurrentRow(found_idx)
+            self.film.blockSignals(False)
+            
+            # Always force on_select_item to update the main view
+            # Pass the row directly to avoid selection sync issues
+            print(f"   Forcing on_select_item with force_row={found_idx}...")
+            self.on_select_item(force_row=found_idx)
+        else:
+            print(f"⚠️ Item {name} not in filmstrip (loading?). Forcing direct load...")
+            # Fallback: manually set current and load it, even if not in filmstrip
+            real_idx = next((i for i, v in enumerate(self.items) if v["name"] == name), -1)
+            if real_idx >= 0:
+                self.current = real_idx
+                # Manually trigger what on_select_item does
+                self.update_status("Loading image...")
+                
+                # Initialize undo if needed
+                cur_it = self.items[self.current]
+                self.undo_stack.setdefault(name, [dict(cur_it["settings"])])
+                self.redo_stack.setdefault(name, [])
+                
+                # Force load UI and Preview
+                self.load_settings_to_ui()
+                self._mark_active_preset(cur_it.get("applied_preset"))
+                self._kick_preview_thread(force=True)
+                self.update_info_tab(name) # Update info manually since filmstrip didn't trigger it
 
     def _on_library_rating(self, grid_row, star_status):
         """Called when user rates an item in library grid"""

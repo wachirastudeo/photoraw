@@ -150,7 +150,10 @@ class LibraryView(QWidget):
         self.grid.setCurrentRow(index)
 
     def _on_double_click(self, item):
+        import datetime
+        print(f"🖱️ LibraryView Double Click detected at {datetime.datetime.now()}!")
         row = self.grid.row(item)
+        print(f"   -> Emitting sig_open_edit for row {row}")
         self.sig_open_edit.emit(row)
         
     def eventFilter(self, source, event):

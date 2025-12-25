@@ -103,122 +103,127 @@ class PreviewWorker(QRunnable):
         return np.array(Image.fromarray(arr).resize((nw, nh), resample), dtype=np.uint8)
 
     def run(self):
-        if PreviewWorker.is_stale(self.req_id): return
+        try:
+            if PreviewWorker.is_stale(self.req_id): return
 
-        if self.is_zoomed and self.mode == "single":
-            # ... (Zoom logic remains same) ...
-            # OPTIMIZATION: Crop-then-Process approach
-            # Instead of processing the full image (slow with effects), we:
-            # 1. Apply geometric transforms (Rotate/Flip/Crop) to the raw image
-            # 2. Crop the visible area
-            # 3. Process only the cropped patch
-            
-            # 1. Get Geometrically Transformed Raw (Cached)
-            # We only care about geometric settings for this cache
-            geo_keys = ["rotate", "flip_h", "crop"]
-            geo_settings = {k: self.adj.get(k) for k in geo_keys}
-            geo_hash = str(sorted(geo_settings.items()))
-            zoom_geo_cache_key = ("zoom_geo_raw", geo_hash)
-            
-            if zoom_geo_cache_key in self.processed_cache:
-                transformed_raw = self.processed_cache[zoom_geo_cache_key]
+            if self.is_zoomed and self.mode == "single":
+                # ... (Zoom logic remains same) ...
+                # OPTIMIZATION: Crop-then-Process approach
+                # Instead of processing the full image (slow with effects), we:
+                # 1. Apply geometric transforms (Rotate/Flip/Crop) to the raw image
+                # 2. Crop the visible area
+                # 3. Process only the cropped patch
+                
+                # 1. Get Geometrically Transformed Raw (Cached)
+                # We only care about geometric settings for this cache
+                geo_keys = ["rotate", "flip_h", "crop"]
+                geo_settings = {k: self.adj.get(k) for k in geo_keys}
+                geo_hash = str(sorted(geo_settings.items()))
+                zoom_geo_cache_key = ("zoom_geo_raw", geo_hash)
+                
+                if zoom_geo_cache_key in self.processed_cache:
+                    transformed_raw = self.processed_cache[zoom_geo_cache_key]
+                else:
+                    # Apply transforms to raw image (disable export sharpen for this step)
+                    geo_adj = self.adj.copy()
+                    geo_adj["export_sharpen"] = 0.0
+                    transformed_raw = apply_transforms(self.full_rgb, geo_adj)
+                    self.processed_cache[zoom_geo_cache_key] = transformed_raw
+                
+                # 2. Calculate Crop Coordinates
+                h_full, w_full, _ = transformed_raw.shape
+                preview_w, preview_h = self.preview_size.width(), self.preview_size.height()
+
+                crop_w, crop_h = preview_w, preview_h
+                center_x = self.zoom_point.x() * w_full
+                center_y = self.zoom_point.y() * h_full
+
+                x0 = int(round(center_x - crop_w / 2))
+                y0 = int(round(center_y - crop_h / 2))
+
+                # Clamp to image boundaries
+                x0 = max(0, min(w_full - crop_w, x0))
+                y0 = max(0, min(h_full - crop_h, y0))
+                
+                # Crop the raw patch
+                raw_patch = transformed_raw[y0:y0+crop_h, x0:x0+crop_w].copy()
+                
+                # 3. Process the Patch
+                # Disable vignette for patch processing to avoid mini-vignette
+                patch_adj = self.adj.copy()
+                patch_adj["vignette"] = 0.0
+                
+                # Process color/effects on the small patch (Fast!)
+                # Enable fast mode if live dragging OR panning
+                is_fast = self.live or self.panning
+                out = process_image_fast(raw_patch, patch_adj, fast_mode=is_fast)
+                
+                # Apply preview sharpening
+                out = preview_sharpen(out, self.sharpen_amt)
+                
+                if PreviewWorker.is_stale(self.req_id): return
+                self.signals.ready.emit(out)
+                return
             else:
-                # Apply transforms to raw image (disable export sharpen for this step)
-                geo_adj = self.adj.copy()
-                geo_adj["export_sharpen"] = 0.0
-                transformed_raw = apply_transforms(self.full_rgb, geo_adj)
-                self.processed_cache[zoom_geo_cache_key] = transformed_raw
-            
-            # 2. Calculate Crop Coordinates
-            h_full, w_full, _ = transformed_raw.shape
-            preview_w, preview_h = self.preview_size.width(), self.preview_size.height()
+                # Normal preview logic
+                target_long_edge = self.long_edge
+                
+                # Only reduce preview quality if explicitly in Fast Mode (low_spec)
+                if self.low_spec and self.live:
+                    target_long_edge = 240  # Fast Mode: super small for speed
+                # Normal live mode: keep full quality, just use fast_mode for processing
+                
+                # Use fast resize during live preview, quality resize otherwise
+                base = self.base_override if self.base_override is not None else self._resize_long(
+                    self.full_rgb, target_long_edge, use_fast=self.live
+                )
 
-            crop_w, crop_h = preview_w, preview_h
-            center_x = self.zoom_point.x() * w_full
-            center_y = self.zoom_point.y() * h_full
+            if self.mode == "split":
+                # copy to keep base intact
+                base_local = base
+                b = apply_transforms(base.copy(), self.adj)
+                # AFTER: แต่งสี + transforms
+                # AFTER: แต่งสี + transforms
+                # src01 = base_local.astype(np.float32)/255.0
+                # after01 = pipeline(src01, self.adj, fast_mode=self.live)
+                # a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
+                a = process_image_fast(base_local, self.adj, fast_mode=self.live)
+                a = apply_transforms(a, self.adj)
 
-            x0 = int(round(center_x - crop_w / 2))
-            y0 = int(round(center_y - crop_h / 2))
+                if not self.live:
+                    b = preview_sharpen(b, self.sharpen_amt)
+                    a = preview_sharpen(a, self.sharpen_amt)
+                else:
+                    # Apply sharpening even in live mode for better perceived quality
+                    # It's a simple 3x3 convolution on a resized image, so it should be fast enough
+                    b = preview_sharpen(b, self.sharpen_amt)
+                    a = preview_sharpen(a, self.sharpen_amt)
 
-            # Clamp to image boundaries
-            x0 = max(0, min(w_full - crop_w, x0))
-            y0 = max(0, min(h_full - crop_h, y0))
+                h = min(b.shape[0], a.shape[0])
+                if b.shape[0]!=h: b = np.array(Image.fromarray(b).resize((b.shape[1], h), Image.BILINEAR))
+                if a.shape[0]!=h: a = np.array(Image.fromarray(a).resize((a.shape[1], h), Image.BILINEAR))
+                out = np.concatenate([b, a], axis=1)
+                if PreviewWorker.is_stale(self.req_id): return
+                self.signals.ready.emit(out)
+                return
+
+            # โหมดปกติ: AFTER อย่างเดียว
+            # โหมดปกติ: AFTER อย่างเดียว
+            # src01 = base.astype(np.float32)/255.0
+            # out01 = pipeline(src01, self.adj, fast_mode=self.live)
+            # out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
+            out = process_image_fast(base, self.adj, fast_mode=self.live)
+            out = apply_transforms(out, self.adj)
             
-            # Crop the raw patch
-            raw_patch = transformed_raw[y0:y0+crop_h, x0:x0+crop_w].copy()
-            
-            # 3. Process the Patch
-            # Disable vignette for patch processing to avoid mini-vignette
-            patch_adj = self.adj.copy()
-            patch_adj["vignette"] = 0.0
-            
-            # Process color/effects on the small patch (Fast!)
-            # Enable fast mode if live dragging OR panning
-            is_fast = self.live or self.panning
-            out = process_image_fast(raw_patch, patch_adj, fast_mode=is_fast)
-            
-            # Apply preview sharpening
+            # Apply sharpening in live mode too
             out = preview_sharpen(out, self.sharpen_amt)
-            
+                
             if PreviewWorker.is_stale(self.req_id): return
             self.signals.ready.emit(out)
-            return
-        else:
-            # Normal preview logic
-            target_long_edge = self.long_edge
-            
-            # Only reduce preview quality if explicitly in Fast Mode (low_spec)
-            if self.low_spec and self.live:
-                target_long_edge = 240  # Fast Mode: super small for speed
-            # Normal live mode: keep full quality, just use fast_mode for processing
-            
-            # Use fast resize during live preview, quality resize otherwise
-            base = self.base_override if self.base_override is not None else self._resize_long(
-                self.full_rgb, target_long_edge, use_fast=self.live
-            )
-
-        if self.mode == "split":
-            # copy to keep base intact
-            base_local = base
-            b = apply_transforms(base.copy(), self.adj)
-            # AFTER: แต่งสี + transforms
-            # AFTER: แต่งสี + transforms
-            # src01 = base_local.astype(np.float32)/255.0
-            # after01 = pipeline(src01, self.adj, fast_mode=self.live)
-            # a = (np.clip(after01,0,1)*255.0 + 0.5).astype(np.uint8)
-            a = process_image_fast(base_local, self.adj, fast_mode=self.live)
-            a = apply_transforms(a, self.adj)
-
-            if not self.live:
-                b = preview_sharpen(b, self.sharpen_amt)
-                a = preview_sharpen(a, self.sharpen_amt)
-            else:
-                # Apply sharpening even in live mode for better perceived quality
-                # It's a simple 3x3 convolution on a resized image, so it should be fast enough
-                b = preview_sharpen(b, self.sharpen_amt)
-                a = preview_sharpen(a, self.sharpen_amt)
-
-            h = min(b.shape[0], a.shape[0])
-            if b.shape[0]!=h: b = np.array(Image.fromarray(b).resize((b.shape[1], h), Image.BILINEAR))
-            if a.shape[0]!=h: a = np.array(Image.fromarray(a).resize((a.shape[1], h), Image.BILINEAR))
-            out = np.concatenate([b, a], axis=1)
-            if PreviewWorker.is_stale(self.req_id): return
-            self.signals.ready.emit(out)
-            return
-
-        # โหมดปกติ: AFTER อย่างเดียว
-        # โหมดปกติ: AFTER อย่างเดียว
-        # src01 = base.astype(np.float32)/255.0
-        # out01 = pipeline(src01, self.adj, fast_mode=self.live)
-        # out   = (np.clip(out01,0,1)*255.0 + 0.5).astype(np.uint8)
-        out = process_image_fast(base, self.adj, fast_mode=self.live)
-        out = apply_transforms(out, self.adj)
-        
-        # Apply sharpening in live mode too
-        out = preview_sharpen(out, self.sharpen_amt)
-            
-        if PreviewWorker.is_stale(self.req_id): return
-        self.signals.ready.emit(out)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"❌ PreviewWorker failed: {e}")
 
 class ExportSignals(QObject):
     progress=Signal(int,int); done=Signal(str); error=Signal(str)
