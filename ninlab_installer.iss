@@ -2,7 +2,7 @@
 ; This creates a professional Windows installer
 
 #define MyAppName "Ninlab"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.1.0"
 #define MyAppPublisher "Wachira Studio"
 #define MyAppURL "https://ninlab.app"
 #define MyAppExeName "Ninlab.exe"
@@ -40,8 +40,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\Ninlab\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\Ninlab\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\NinlabApp\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\NinlabApp\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

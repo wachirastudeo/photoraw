@@ -1,13 +1,34 @@
 from PyInstaller.utils.hooks import collect_submodules
+import os
 
-hidden_imports = ['imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 'cropper', 'curve_widget', 'rawpy', 'exifread']
+# Collect all hidden imports
+hidden_imports = [
+    'imaging', 'workers', 'ui_helpers', 'catalog', 'export_dialog', 
+    'cropper', 'curve_widget', 'histogram_widget', 'library_view', 
+    'cache_manager', 'rawpy', 'exifread'
+]
 hidden_imports += collect_submodules('scipy')
+
+# Collect data files
+datas = [
+    ('icon.ico', '.'),
+    ('cb_checked.png', '.'),
+    ('cb_unchecked.png', '.'),
+]
+
+# Add exiftool if it exists
+if os.path.exists('exiftool.exe'):
+    datas.append(('exiftool.exe', '.'))
+
+# Add Rust extension if it exists
+if os.path.exists('ninlab_core_rs'):
+    datas.append(('ninlab_core_rs', 'ninlab_core_rs'))
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
@@ -23,7 +44,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='NinlabApp',
+    name='Ninlab',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

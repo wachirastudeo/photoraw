@@ -4,8 +4,8 @@ echo Building Ninlab Installer
 echo ========================================
 echo.
 
-REM Check if dist\Ninlab exists
-if not exist "dist\Ninlab\Ninlab.exe" (
+REM Check if dist\NinlabApp exists
+if not exist "dist\NinlabApp\Ninlab.exe" (
     echo ERROR: Executable not found!
     echo Please run build_windows.bat first to create the executable.
     echo.

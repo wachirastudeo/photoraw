@@ -385,10 +385,6 @@ class Main(QMainWindow):
         self.sort_items("Name")
         
         # Start in Library Mode if items exist, otherwise stick to current (or Library empty)
-        # But wait, helper functions for mode switching need to be defined first? 
-        # Python allows calling methods defined later.
-        self.mode_library()
-
         self.mode_library()
 
         # if not self.splash:
@@ -1317,16 +1313,26 @@ class Main(QMainWindow):
             self.loaded+=1; self.update_status()
 
     def update_status(self, extra=""):
+        import time
         if self.to_load>0 and self.loaded<self.to_load:
             msg = f"Loading... {self.loaded}/{self.to_load} {extra}"
             self.status.setText(msg)
             if self.loading_overlay.isVisible():
-                pct = int(self.loaded*100/self.to_load) if self.to_load else 0
-                self.loading_overlay.update_progress(msg, pct)
+                # Throttle overlay updates to prevent freezing (max 10 updates/sec)
+                current_time = time.time()
+                if not hasattr(self, '_last_overlay_update'):
+                    self._last_overlay_update = 0
+                
+                if current_time - self._last_overlay_update > 0.1:  # 100ms throttle
+                    pct = int(self.loaded*100/self.to_load) if self.to_load else 0
+                    self.loading_overlay.update_progress(msg, pct)
+                    self._last_overlay_update = current_time
+                    # ❌ ลบ processEvents() - ทำให้ frozen app ค้าง
         else:
             self.status.setText(extra if extra else "Ready")
             if self.loading_overlay.isVisible():
                 self.loading_overlay.setVisible(False)
+                # ❌ ลบ processEvents() - ให้ event loop จัดการเอง
 
     def _on_decode_error(self, message):
         print(f"Error loading: {message}")
@@ -2870,14 +2876,18 @@ class Main(QMainWindow):
         existing_files = []
         total_scan = len(image_files)
         
+        # Show loading overlay once at the beginning if there are files to process
         if total_scan > 0:
-            self.loading_overlay.setVisible(True)
-            self.loading_overlay.raise_()
             self._center_loading_overlay()
+            self.loading_overlay.setVisible(True)
+            self.loading_overlay.update_progress(f"Scanning project files...", 0)
 
+        # Scan files with minimal UI updates to prevent freezing
         for i, k in enumerate(image_files):
-            if i % 50 == 0:
-                self.loading_overlay.update_progress(f"Scanning project files {i}/{total_scan}...", int(i*90/max(1, total_scan)))
+            # Only update every 200 files to prevent UI freezing
+            if i % 200 == 0 and total_scan > 0:
+                pct = int(i*90/max(1, total_scan))
+                self.loading_overlay.update_progress(f"Scanning project files {i}/{total_scan}...", pct)
             try:
                 if Path(k).exists():
                     existing_files.append(k)
@@ -2885,10 +2895,9 @@ class Main(QMainWindow):
                 pass
         
         if existing_files:
-            self.loading_overlay.setVisible(True)
-            self.loading_overlay.raise_()
-            self._center_loading_overlay()
+            # Update the same overlay, don't create/show again
             self.loading_overlay.progress.setRange(0, 100)
+            self.loading_overlay.update_progress(f"Restoring {len(existing_files)} images...", 95)
                 
             self.to_load = len(existing_files)
             self.loaded = 0
@@ -2911,6 +2920,7 @@ class Main(QMainWindow):
                 w.signals.error.connect(self._on_decode_error)
                 self.pool.start(w)
         else:
+            # No existing files, hide overlay
             self.loading_overlay.setVisible(False)
 
 
@@ -3433,14 +3443,68 @@ class Main(QMainWindow):
         if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
             self.loading_overlay.resize(self.size())
 
-if __name__=="__main__":
-    # macOS HiDPI / Retina: rely on Qt6 auto scaling, just adjust rounding and layer usage
+if __name__ == '__main__':
+    # CRITICAL: Fix for PyInstaller on Windows to prevent multiple windows
+    import multiprocessing
+    import sys
+    import os
+    
+    # Freeze support for PyInstaller - MUST be first
+    multiprocessing.freeze_support()
+    
+    # EXTRA ROBUSTNESS: If freeze_support didn't catch it, check args manually.
+    if len(sys.argv) > 1:
+        for arg in sys.argv:
+            if "multiprocessing" in arg or "from multiprocessing.spawn" in arg:
+                sys.exit(0)
+    
+    # SINGLE INSTANCE GUARD using Windows Mutex
+    # This prevents multiple copies of the app from running
+    import ctypes
+    from ctypes import wintypes
+    import atexit
+    
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    
+    # Windows API functions
+    CreateMutex = kernel32.CreateMutexW
+    CreateMutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    CreateMutex.restype = wintypes.HANDLE
+    
+    ERROR_ALREADY_EXISTS = 183
+    
+    # Create a unique mutex for this application
+    # IMPORTANT: Store as global to prevent garbage collection
+    mutex_name = "Global\\NinlabPhotoEditorSingleInstanceMutex_v2"
+    _global_mutex = CreateMutex(None, True, mutex_name)  # True = initially owned by this process
+    
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        # Another instance is already running, exit silently
+        print("Another instance is already running. Exiting...")
+        sys.exit(0)
+    
+    # Register cleanup function to run at exit
+    def cleanup_mutex():
+        global _global_mutex
+        if _global_mutex:
+            try:
+                kernel32.CloseHandle(_global_mutex)
+            except:
+                pass
+    
+    atexit.register(cleanup_mutex)
+    
+    # macOS HiDPI / Retina: rely on Qt6 auto scaling
     if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
         QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    # if sys.platform == "darwin":
-    #     os.environ.setdefault("QT_MAC_WANTS_LAYER", "1") # This can cause blank screens on some macOS/Qt versions
-    app=QApplication(sys.argv)
     
-    w=Main()
+    app = QApplication(sys.argv)
+    
+    w = Main()
     w.showMaximized()
+    
     sys.exit(app.exec())
+
+
+
+

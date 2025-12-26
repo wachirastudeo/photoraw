@@ -277,7 +277,16 @@ class FlowLayout(QLayout):
 class LoadingOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False) # Block mouse events
+        
+        # Set window flags to ensure proper z-order and behavior
+        if parent:
+            self.setWindowFlags(Qt.Widget)  # Make it a child widget
+        
+        # Block mouse events to prevent interaction with underlying widgets
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        
+        # Ensure it stays on top within its parent
+        self.setAttribute(Qt.WA_StyledBackground, True)
         
         # Main layout for the overlay (centers the box)
         main_layout = QVBoxLayout(self)
@@ -331,7 +340,22 @@ class LoadingOverlay(QWidget):
         self.setStyleSheet("background-color: rgba(0, 0, 0, 80);")
 
     def update_progress(self, message, percent):
+        """Update progress without blocking the event loop"""
         self.status.setText(message)
         self.progress.setValue(percent)
-        QApplication.processEvents()
+        # Don't call processEvents() here - it causes recursive loops and freezing
+    
+    def resizeEvent(self, event):
+        """Ensure overlay always fills parent when resized"""
+        super().resizeEvent(event)
+        if self.parent():
+            self.resize(self.parent().size())
+        # Don't call processEvents() here - it causes paint recursion
+    
+    def showEvent(self, event):
+        """Ensure overlay is properly sized when shown"""
+        super().showEvent(event)
+        if self.parent():
+            self.resize(self.parent().size())
+        # Qt event loop will handle the update automatically
 
