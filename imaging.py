@@ -499,8 +499,10 @@ def apply_hsl_mixer(rgb, adj):
         w=_color_weight(h,center)
         dh=float(adj.get(f"h_{name}",0.0)); ds=float(adj.get(f"s_{name}",0.0)); dl=float(adj.get(f"l_{name}",0.0))
         if abs(dh)>1e-6: hn=(hn+dh*w)%360.0
-        if abs(ds)>1e-6: sn=np.clip(sn*(1.0+ds*w),0,1)
-        if abs(dl)>1e-6: vn=np.clip(vn+dl*w*0.5,0,1)
+        # Increased saturation sensitivity from 1.0 to 1.5 for stronger effect
+        if abs(ds)>1e-6: sn=np.clip(sn*(1.0+ds*w*1.5),0,1)
+        # Increased luminance sensitivity from 0.5 to 0.8 for stronger effect
+        if abs(dl)>1e-6: vn=np.clip(vn+dl*w*0.8,0,1)
     return hsv_to_rgb(hn,sn,vn)
 
 def pipeline(rgb01, adj, fast_mode=False):
@@ -792,71 +794,59 @@ def decode_image(path, thumb_size=(72,48)):
                         
                         if best_img:
                             # Robust Orientation Handling
-                            # 1. Check if the image already has orientation info (Standard PIL)
-                            has_pil_orientation = False
-                            try:
-                                exif = best_img.getexif()
-                                if exif and 274 in exif: # 274 = Orientation
-                                    if exif[274] != 1: # Only trust if it requires rotation
-                                        has_pil_orientation = True
-                            except:
-                                pass
+                            # Always use ExifTool for orientation (more reliable than embedded EXIF in CR3 previews)
+                            # PIL's exif_transpose() doesn't work correctly with CR3 preview streams
                             
-                            # 2. If PIL sees orientation, let PIL handle it
-                            if has_pil_orientation:
-                                from PIL import ImageOps
-                                best_img = ImageOps.exif_transpose(best_img)
-                                
-                            # 3. If PIL didn't see orientation (common in CR3 preview streams), find it externally
+                            # Get orientation from ExifTool
+                            orientation = None
+                            
+                            import subprocess
+                            import json
+                            
+                            exiftool_path = None
+                            possible_locations = [
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exiftool.exe'),
+                                os.path.join(os.getcwd(), 'exiftool.exe'),
+                                'exiftool.exe',
+                            ]
+                            for loc in possible_locations:
+                                if os.path.isfile(loc):
+                                    exiftool_path = loc
+                                    break
+                            
+                            if exiftool_path:
+                                try:
+                                    # Use -n to get numeric value
+                                    result = subprocess.run(
+                                        [exiftool_path, '-Orientation', '-n', '-j', str(path)],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=1
+                                    )
+                                    if result.returncode == 0 and result.stdout:
+                                        data = json.loads(result.stdout)[0]
+                                        orientation = data.get('Orientation')
+                                except:
+                                    pass
+                            
+                            # Apply Manual Rotation based on orientation
+                            if orientation:
+                                print(f"  📐 Orientation value: {orientation}")
+                                try:
+                                    val = int(orientation)
+                                    if val == 3: # Rotate 180
+                                        best_img = best_img.rotate(180, expand=True)
+                                        print(f"  🔄 Rotated 180°")
+                                    elif val == 6: # Rotate 90 CW
+                                        best_img = best_img.rotate(270, expand=True)
+                                        print(f"  🔄 Rotated 270° (for orientation 6)")
+                                    elif val == 8: # Rotate 270 CW  
+                                        best_img = best_img.rotate(90, expand=True)
+                                        print(f"  🔄 Rotated 90° (for orientation 8)")
+                                except Exception as e:
+                                    print(f"  ⚠️  Rotation failed: {e}")
                             else:
-                                orientation = None
-                                
-                                # Try ExifRead on stream (if we could, but stream is gone/hard to reconstruct perfectly)
-                                # Let's go straight to ExifTool for robust fallback which matches the file container
-                                import subprocess
-                                import json
-                                
-                                exiftool_path = None
-                                possible_locations = [
-                                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exiftool.exe'),
-                                    os.path.join(os.getcwd(), 'exiftool.exe'),
-                                    'exiftool.exe',
-                                ]
-                                for loc in possible_locations:
-                                    if os.path.isfile(loc):
-                                        exiftool_path = loc
-                                        break
-                                
-                                if exiftool_path:
-                                    try:
-                                        # Use -n to get numeric value
-                                        result = subprocess.run(
-                                            [exiftool_path, '-Orientation', '-n', '-j', str(path)],
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=1
-                                        )
-                                        if result.returncode == 0 and result.stdout:
-                                            data = json.loads(result.stdout)[0]
-                                            orientation = data.get('Orientation')
-                                    except:
-                                        pass
-                                
-                                # 4. Apply Manual Rotation based on external orientation
-                                if orientation:
-                                    try:
-                                        val = int(orientation)
-                                        if val == 3: # Rotate 180
-                                            best_img = best_img.rotate(180, expand=True)
-                                            # print(f"  🔄 External Force Rotated 180°")
-                                        elif val == 6: # Rotate 90 CW
-                                            best_img = best_img.rotate(270, expand=True) # 270 CCW
-                                            # print(f"  🔄 External Force Rotated 90° CW")
-                                        elif val == 8: # Rotate 270 CW
-                                            best_img = best_img.rotate(90, expand=True) # 90 CCW
-                                            # print(f"  🔄 External Force Rotated 270° CW")
-                                    except:
-                                        pass
+                                print(f"  ⚠️  No orientation found from ExifTool")
                             
                             if best_img.mode != "RGB":
                                 best_img = best_img.convert("RGB")
@@ -924,10 +914,10 @@ def decode_image(path, thumb_size=(72,48)):
                                                 val = int(orientation)
                                                 if val == 3: # Rotate 180
                                                     img = img.rotate(180, expand=True)
-                                                elif val == 6: # Rotate 90 CW
-                                                    img = img.rotate(270, expand=True) # 270 CCW
-                                                elif val == 8: # Rotate 270 CW
-                                                    img = img.rotate(90, expand=True) # 90 CCW
+                                                elif val == 6: # Rotate 90 CW = need to rotate 270° to display (90° CCW)
+                                                    img = img.rotate(270, expand=True)
+                                                elif val == 8: # Rotate 270 CW = need to rotate 90° to display
+                                                    img = img.rotate(90, expand=True)
                                             except:
                                                 pass
                                     

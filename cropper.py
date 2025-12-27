@@ -422,6 +422,10 @@ class CropDialog(QDialog):
 
     def eventFilter(self, obj, ev):
         if obj is self.overlay:
+            # Only process mouse events that have pos()
+            if ev.type() not in (QEvent.MouseMove, QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+                return super().eventFilter(obj, ev)
+            
             pos = ev.pos()
             
             # Mouse move for cursor and dragging

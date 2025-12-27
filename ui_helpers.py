@@ -187,6 +187,10 @@ def badge_star(pixmap: QPixmap, starred: bool) -> QPixmap:
     p.end(); return pm
 
 def qimage_from_u8(arr):
+    import numpy as np
+    # Ensure array is C-contiguous (required by QImage)
+    if not arr.flags['C_CONTIGUOUS']:
+        arr = np.ascontiguousarray(arr)
     h,w,_=arr.shape
     return QImage(arr.data, w, h, 3*w, QImage.Format_RGB888)
 

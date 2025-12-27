@@ -168,7 +168,11 @@ class PreviewWorker(QRunnable):
                 out = preview_sharpen(out, self.sharpen_amt)
                 
                 if PreviewWorker.is_stale(self.req_id): return
-                self.signals.ready.emit(out)
+                try:
+                    self.signals.ready.emit(out)
+                except RuntimeError:
+                    # Signal source has been deleted (window closed)
+                    pass
                 return
             else:
                 # Normal preview logic
@@ -180,7 +184,7 @@ class PreviewWorker(QRunnable):
                 # Normal live mode: keep full quality, just use fast_mode for processing
                 
                 # Use fast resize during live preview, quality resize otherwise
-                base = self.base_override if self.base_override is not None else self._resize_long(
+                base = self.base_override if self.base_override is not None else self._resize_long(\
                     self.full_rgb, target_long_edge, use_fast=self.live
                 )
 
@@ -215,7 +219,11 @@ class PreviewWorker(QRunnable):
                 if a.shape[0]!=h: a = np.array(Image.fromarray(a).resize((a.shape[1], h), Image.BILINEAR))
                 out = np.concatenate([b, a], axis=1)
                 if PreviewWorker.is_stale(self.req_id): return
-                self.signals.ready.emit(out)
+                try:
+                    self.signals.ready.emit(out)
+                except RuntimeError:
+                    # Signal source has been deleted (window closed)
+                    pass
                 return
 
             # โหมดปกติ: AFTER อย่างเดียว
@@ -234,7 +242,11 @@ class PreviewWorker(QRunnable):
             out = preview_sharpen(out, self.sharpen_amt)
                 
             if PreviewWorker.is_stale(self.req_id): return
-            self.signals.ready.emit(out)
+            try:
+                self.signals.ready.emit(out)
+            except RuntimeError:
+                # Signal source has been deleted (window closed)
+                pass
         except Exception as e:
             import traceback
             traceback.print_exc()

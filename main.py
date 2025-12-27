@@ -2132,24 +2132,14 @@ class Main(QMainWindow):
         
         # Custom ordering: Film presets at top, B&W at bottom
         preset_order = [
-            # Film presets (top)
-            "Film",
+            # Film presets
             "Kodak Portra 400",
-            "Kodachrome",
-            "Portra",
-            # Creative/Portrait presets
-            "Portrait",
-            "Portrait Enhancement",
-            "Green Forest",
-            "Bright & Airy",
-            "Cinematic",
-            "Clean Boost",
-            "Cool Matte",
-            "Fuji Velvia 50",
-            "Golden Hour",
-            # Black & White (bottom)
-            "Faded B&W",
-            "B&W High Contrast",
+            "Fuji Pro 400H",
+            "Agfa Vista 200",
+            "Natural Garden",
+            # Black & White
+            "Kodak Tri-X 400",
+            "Ilford HP5 Plus",
         ]
         
         # Add presets in custom order first
@@ -2723,82 +2713,77 @@ class Main(QMainWindow):
     def _default_presets(self):
         base = lambda **k: {**{kk:vv for kk,vv in DEFAULTS.items() if kk not in ("crop","rotate","flip_h")}, **k}
         return {
-            "Clean Boost": base(exposure=0.25, contrast=0.12, clarity=0.08, vibrance=0.12, export_sharpen=0.35),
-        "Vivid Punch": base(contrast=0.2, saturation=0.18, vibrance=0.22, texture=0.1, mid_contrast=0.08, export_sharpen=0.4),
-        "Soft Film": base(contrast=-0.08, clarity=-0.06, texture=-0.04, gamma=1.05, vignette=0.12, export_sharpen=0.25),
-        "Mono Matte": base(saturation=-1.0, vibrance=-1.0, contrast=-0.05, mid_contrast=0.1, clarity=0.04, vignette=0.08, export_sharpen=0.3),
-        "Warm Portrait": base(contrast=0.06, highlights=-0.05, shadows=0.08, temperature=0.1, tint=0.05, clarity=0.02, vibrance=0.08, denoise=0.1),
-        
-        # New Presets
-        "Cool Matte": base(saturation=-0.2, vibrance=-0.1, temperature=-0.1, blacks=0.1, mid_contrast=-0.1, vignette=0.15),
-        "B&W High Contrast": base(saturation=-1.0, vibrance=-1.0, contrast=0.25, mid_contrast=0.15, clarity=0.15, highlights=0.1, shadows=-0.1, export_sharpen=0.5),
-        "Vintage Warm": base(temperature=0.15, tint=0.05, contrast=-0.1, gamma=1.05, blacks=0.1, vignette=0.25, texture=-0.05),
-        "Cinematic": base(
-            contrast=0.1, mid_contrast=0.05, vibrance=0.1, saturation=-0.1,
-            # Teal shadows / Orange highlights approximation using HSL
-            h_orange=-5, s_orange=0.1, l_orange=0.05,  # Skin tones
-            h_blue=-10, s_blue=0.2, l_blue=-0.1,       # Shadows/Blues -> Teal
-            h_aqua=10, s_aqua=0.1,                     # Aqua -> Teal
-            vignette=0.15, export_sharpen=0.3
-        ),
+            # ========== FILM PRESETS (5) ==========
+            
+            # 1. Kodak Portra 400 - Warm, natural skin tones, soft contrast
+            "Kodak Portra 400": base(
+                temperature=0.05, tint=0.01,        # Slightly warm
+                contrast=0.05, mid_contrast=-0.05,  # Soft contrast
+                highlights=-0.1, shadows=0.15,      # Improved dynamic range
+                vibrance=0.15, saturation=-0.05,    # Rich but not oversaturated
+                h_yellow=-10, s_yellow=0.1,         # Warm yellows
+                h_orange=-5, s_orange=0.05,         # Healthy skin
+                grain_amount=0.15, grain_size=0.1,  # Fine grain
+                export_sharpen=0.2
+            ),
 
-        # --- New Presets ---
-        
-        # 1. Kodak Portra 400 (Approx) - Warm, good skin tones, soft contrast
-        "Kodak Portra 400": base(
-            temperature=0.08, tint=0.02,        # Slightly warm
-            contrast=0.05, mid_contrast=-0.05,  # Soft contrast
-            highlights=-0.1, shadows=0.15,      # Improved dynamic range
-            vibrance=0.15, saturation=-0.05,    # Rich but not oversaturated
-            h_yellow=-10, s_yellow=0.1,         # Warm yellows
-            h_orange=-5, s_orange=0.05,         # Healthy skin
-            grain_amount=0.15, grain_size=0.1,  # Fine grain
-            export_sharpen=0.2
-        ),
+            # 2. Fuji Pro 400H - Soft pastel tones, ideal for portraits
+            "Fuji Pro 400H": base(
+                contrast=-0.05, mid_contrast=-0.12, # Very soft, low contrast
+                highlights=-0.15, shadows=0.20,     # Open shadows, gentle highlights
+                vibrance=0.08, saturation=-0.12,    # Subtle, muted colors
+                temperature=0.03, tint=-0.05,       # Slight cool-green shift
+                clarity=-0.05,                      # Soft, dreamy look
+                grain_amount=0.08, grain_size=0.06, # Very fine grain
+                export_sharpen=0.15
+            ),
 
-        # 2. Fuji Velvia 50 (Approx) - VIVID, high contrast, strong nature colors
-        "Fuji Velvia 50": base(
-            contrast=0.25, mid_contrast=0.1,    # High contrast
-            saturation=0.25, vibrance=0.2,      # Very colorful
-            blacks=-0.1,                        # Deep blacks
-            h_green=10, s_green=0.2,            # Lush greens
-            h_blue=-5, s_blue=0.2,              # Deep sky blues
-            l_blue=-0.1,
-            clarity=0.15,
-            export_sharpen=0.4
-        ),
+            # 3. Kodak Tri-X 400 - Classic B&W film with character
+            "Kodak Tri-X 400": base(
+                saturation=-1.0, vibrance=-1.0,     # Black and white
+                contrast=0.10, mid_contrast=0.06,   # Classic contrast
+                highlights=-0.05, shadows=0.10,     # Balanced tones
+                clarity=0.04,                       # Slightly defined
+                grain_amount=0.20, grain_size=0.14, # Prominent grain
+                export_sharpen=0.28
+            ),
 
-        # 3. Bright & Airy - Clean, bright, low contrast
-        "Bright & Airy": base(
-            exposure=0.3,                       # Brighter
-            contrast=-0.15, mid_contrast=-0.1,  # Lower contrast
-            highlights=-0.2, shadows=0.3,       # Open up shadows
-            vibrance=0.1, saturation=-0.1,      # Clean colors
-            temperature=-0.02,                  # Neutral/Slightly cool
-            clarity=0.05, texture=-0.05         # Soft but clear
-        ),
+            # 4. Ilford HP5 Plus - Smooth B&W with fine grain
+            "Ilford HP5 Plus": base(
+                saturation=-1.0, vibrance=-1.0,     # Black and white
+                contrast=0.08, mid_contrast=0.05,   # Gentle contrast
+                highlights=-0.08, shadows=0.08,     # Balanced tones
+                clarity=0.02,                       # Soft but clear
+                grain_amount=0.15, grain_size=0.10, # Medium fine grain
+                export_sharpen=0.25
+            ),
 
-        # 4. Moody Dark - Desaturated, dimmed, dramatic
-        "Moody Dark": base(
-            exposure=-0.3,                      # Darker
-            contrast=0.15, mid_contrast=0.1,    # High contrast
-            highlights=-0.4, shadows=-0.1,      # Muted highlights
-            saturation=-0.4, vibrance=-0.2,     # Desaturated
-            vignette=0.4,                       # Strong vignette
-            temperature=-0.05,                  # Slightly cool
-            grain_amount=0.2
-        ),
+            # 5. Agfa Vista 200 - Warm, nostalgic color film
+            "Agfa Vista 200": base(
+                temperature=0.08, tint=0.02,        # Warm tone
+                contrast=0.02, mid_contrast=-0.08,  # Soft, low contrast
+                highlights=-0.12, shadows=0.18,     # Open shadows
+                vibrance=0.10, saturation=-0.08,    # Muted colors
+                h_red=-8, s_red=0.08,               # Warm reds
+                h_yellow=-12, s_yellow=0.10,        # Golden yellows
+                grain_amount=0.12, grain_size=0.09, # Fine grain
+                export_sharpen=0.18
+            ),
 
-        # 5. Golden Hour - Sunset look
-        "Golden Hour": base(
-            temperature=0.25, tint=0.1,         # Very warm
-            highlights=-0.2, whites=-0.1,       # Soft highlights
-            shadows=0.15,
-            h_yellow=-15, s_yellow=0.2, l_yellow=0.1, # Golden sunlight
-            h_orange=-5, s_orange=0.15,
-            contrast=0.1,
-            vignette=0.2
-        ),
+            # ========== ADDITIONAL PRESETS ==========
+            
+            # Natural Garden - Warm, vibrant greens, soft bokeh
+            "Natural Garden": base(
+                temperature=0.04, tint=-0.02,       # Slightly warm, subtle green shift
+                contrast=0.02, mid_contrast=-0.10,  # Very soft, gentle contrast
+                highlights=-0.15, shadows=0.20,     # Open shadows, soft highlights
+                vibrance=0.18, saturation=-0.02,    # Rich colors without oversaturation
+                h_green=5, s_green=0.15,            # Vibrant, lively greens
+                h_red=-5, s_red=0.08,               # Natural warm reds
+                clarity=-0.08,                      # Soft for dreamy bokeh effect
+                grain_amount=0.10, grain_size=0.08, # Fine film grain
+                export_sharpen=0.22
+            ),
     }
 
     def _seed_default_presets(self):
@@ -2831,6 +2816,8 @@ class Main(QMainWindow):
         self.items.clear(); self.current=-1; self.view_filter="All"; self.split_mode=False
         if hasattr(self, "film"): self.film.clear()
         if hasattr(self, "preview"): self.preview.setPixmap(QPixmap())
+        # Clear library view when switching projects
+        if hasattr(self, "library_view"): self.library_view.clear()
         self.lab_project.setText(self.project_display_name)
         self.lab_project.setToolTip(str(self.project_dir))
         self.setWindowTitle(f"Ninlab - {self.project_display_name}")
