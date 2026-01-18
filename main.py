@@ -3447,39 +3447,43 @@ if __name__ == '__main__':
     
     # SINGLE INSTANCE GUARD using Windows Mutex
     # This prevents multiple copies of the app from running
-    import ctypes
-    from ctypes import wintypes
-    import atexit
-    
-    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    
-    # Windows API functions
-    CreateMutex = kernel32.CreateMutexW
-    CreateMutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
-    CreateMutex.restype = wintypes.HANDLE
-    
-    ERROR_ALREADY_EXISTS = 183
-    
-    # Create a unique mutex for this application
-    # IMPORTANT: Store as global to prevent garbage collection
-    mutex_name = "Global\\NinlabPhotoEditorSingleInstanceMutex_v2"
-    _global_mutex = CreateMutex(None, True, mutex_name)  # True = initially owned by this process
-    
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        # Another instance is already running, exit silently
-        print("Another instance is already running. Exiting...")
-        sys.exit(0)
-    
-    # Register cleanup function to run at exit
-    def cleanup_mutex():
-        global _global_mutex
-        if _global_mutex:
-            try:
-                kernel32.CloseHandle(_global_mutex)
-            except:
-                pass
-    
-    atexit.register(cleanup_mutex)
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+        import atexit
+        
+        try:
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            
+            # Windows API functions
+            CreateMutex = kernel32.CreateMutexW
+            CreateMutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+            CreateMutex.restype = wintypes.HANDLE
+            
+            ERROR_ALREADY_EXISTS = 183
+            
+            # Create a unique mutex for this application
+            # IMPORTANT: Store as global to prevent garbage collection
+            mutex_name = "Global\\NinlabPhotoEditorSingleInstanceMutex_v2"
+            _global_mutex = CreateMutex(None, True, mutex_name)  # True = initially owned by this process
+            
+            if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+                # Another instance is already running, exit silently
+                print("Another instance is already running. Exiting...")
+                sys.exit(0)
+            
+            # Register cleanup function to run at exit
+            def cleanup_mutex():
+                global _global_mutex
+                if _global_mutex:
+                    try:
+                        kernel32.CloseHandle(_global_mutex)
+                    except:
+                        pass
+            
+            atexit.register(cleanup_mutex)
+        except Exception as e:
+            print(f"Warning: Single instance check failed: {e}")
     
     # macOS HiDPI / Retina: rely on Qt6 auto scaling
     if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):

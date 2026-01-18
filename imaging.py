@@ -9,6 +9,9 @@ except Exception:
 
 try:
     import ninlab_core
+    # TEMPORARY: Force Python fallback to use corrected highlight logic
+    # The Rust extension has not been updated yet with the new highlight recovery algorithm
+    ninlab_core = None
 except ImportError:
     ninlab_core = None
     # Silently fall back to Python implementation
@@ -184,23 +187,50 @@ def apply_tone_regions(rgb, hi=0.0, sh=0.0, wh=0.0, bl=0.0):
         # Apply more gain to darker areas
         rgb = rgb * (1.0 + (lift - 1.0) * shadow_mask[..., None])
 
-    # Highlight Compression/Recovery
+    # Highlight Adjustment (Spatially Adaptive / Local Contrast Preserving)
+    # Replicates "Shadows/Highlights" tool behavior: Gain is based on BLURRED luminance.
+    # This preserves local contrast (detail) because bright/dark pixels in same region
+    # get adjusted by similar amounts.
     if abs(hi) > 1e-6:
-        # Mask for bright areas (affects pixels > 0.5 luminance)
-        # Stronger effect on brighter pixels
-        hi_mask = np.clip((y - 0.5) * 2.0, 0, 1) ** 2
-        
-        if hi > 0:
-            # Positive: Compress/darken highlights (pull back bright areas)
-            scale = 1.0 + hi * 3.0
-            target = rgb / scale
-            rgb = rgb * (1.0 - hi_mask[..., None]) + target * hi_mask[..., None]
+        # Import scipy (available as seen in apply_clarity)
+        try:
+            from scipy.ndimage import uniform_filter
+            # Calculate large blur radius (e.g., 2% of image dimension)
+            # Enough to separate "regions" from "texture"
+            h, w = rgb.shape[:2]
+            radius = int(max(h, w) * 0.02)
+            radius = max(3, radius) # Minimum size
+            
+            # Create a "Base" (Low Frequency) luminance map
+            # We use this to decide WHICH AREAS are bright, not which pixels
+            # Box blur is fast approximation of Gaussian
+            blur_y = uniform_filter(y, size=radius)
+            
+            # Use BLURRED luminance for masking
+            # If region is bright (>0.7), we darken it
+            hi_mask = np.clip((blur_y - 0.7) * 3.33, 0, 1)
+        except ImportError:
+            # Fallback if scipy missing (unlikely given app structure)
+            hi_mask = np.clip((y - 0.7) * 3.33, 0, 1)
+
+        if hi < 0:
+            # Negative: Recover highlights
+            # Darken regions that are globally bright
+            strength = abs(hi) * 0.5  # Max 50% global reduction
+            
+            # Gain is uniform in local area -> Local contrast preserved
+            gain = 1.0 - strength * hi_mask * 0.8 # Scale effect
+            gain = np.maximum(gain, 0.2)[..., None]
+            
+            rgb = rgb * gain
+            
         else:
-            # Negative: Expand/brighten highlights (boost bright areas)
-            # Make highlights brighter and more detailed
-            boost = 1.0 + abs(hi) * 2.5
-            target = rgb * boost
-            rgb = rgb * (1.0 - hi_mask[..., None]) + target * hi_mask[..., None]
+            # Positive: Brighten highlights
+            strength = hi * 0.5
+            gain = 1.0 + strength * hi_mask
+            gain = gain[..., None]
+            
+            rgb = rgb * gain
 
     # Whites (Point shift)
     if abs(wh) > 1e-6:
@@ -517,6 +547,8 @@ def pipeline(rgb01, adj, fast_mode=False):
     x = apply_tone_regions(x, adj["highlights"], adj["shadows"], adj["whites"], adj["blacks"])
     
     # NOW we can safely clamp mid-pipeline if needed, but keeping float is better
+    # However, to prevent runaway values that might cause solarization on display:
+    x = np.maximum(x, 0.0)
     
     x = apply_dehaze(x, adj["dehaze"])
     
